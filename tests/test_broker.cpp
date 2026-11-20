@@ -774,6 +774,57 @@ LOGOS_TEST(open_requests_stay_within_each_requesters_byte_budget)
     LOGOS_ASSERT_EQ(w.settledError(second), err::failed);
 }
 
+// Results the presenter never pulls can't pile up without end, and can't push
+// out a chooser waiting on the person.
+LOGOS_TEST(the_work_queue_stays_bounded_when_the_presenter_stops_pulling)
+{
+    World w(Attention::Immediate);
+    w.ask();
+    for (int i = 0; i < 3000; ++i)
+        w.broker.submit("basecamp", "nobody.provides", json::object(), true, /*fromPresenter=*/true, w.now);
+    const json work = w.broker.takeWork();
+    LOGOS_ASSERT_LE(work.size(), std::size_t(1000));
+    LOGOS_ASSERT_EQ(workOfKind(work, "choose").size(), std::size_t(1));
+}
+
+// A refusal waiting out its floor holds no open-request slot.
+LOGOS_TEST(the_open_request_limit_holds_while_refusals_wait_out_their_floor)
+{
+    BrokerConfig config;
+    config.maxOpenTotal = 8;
+    World w(Attention::Immediate, false, config);
+    std::vector<IntentBroker::Ticket> over;
+    for (int i = 0; i < 12; ++i) {
+        const auto t = w.ask();
+        if (i >= 8) over.push_back(t);
+        LOGOS_ASSERT_LE(w.broker.openCount(), std::size_t(8));
+    }
+    LOGOS_ASSERT_EQ(w.settledError(over.front()), std::string("<pending>"));
+    w.advance(400);
+    for (const auto& t : over) LOGOS_ASSERT_EQ(w.settledError(t), err::failed);
+
+    // Withdrawn like an open request.
+    const auto withdrawn = w.ask();
+    LOGOS_ASSERT_TRUE(w.broker.cancel("wallet_module", withdrawn.handle, withdrawn.receipt, w.now));
+    LOGOS_ASSERT_EQ(w.settledError(withdrawn), err::cancelled);
+}
+
+// Held refusals are bounded too: past as many as open requests, they settle at once.
+LOGOS_TEST(refusals_waiting_out_their_floor_are_bounded)
+{
+    BrokerConfig config;
+    config.maxOpenTotal = 2;
+    World w(Attention::Immediate, false, config);
+    w.ask();
+    w.ask();
+    const auto held = w.ask();
+    w.ask();
+    const auto atOnce = w.ask();
+    LOGOS_ASSERT_EQ(w.settledError(held), std::string("<pending>"));
+    LOGOS_ASSERT_EQ(w.settledError(atOnce), err::failed);
+    LOGOS_ASSERT_EQ(w.broker.openCount(), std::size_t(2));
+}
+
 LOGOS_TEST(requests_beyond_the_rate_wait_for_tokens)
 {
     BrokerConfig config;

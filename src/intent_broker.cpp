@@ -9,9 +9,9 @@ namespace intents {
 
 namespace {
 
-// Past this, the oldest notice goes. Items someone must answer are never
-// dropped; they're bounded by the per-requester limits instead.
-constexpr std::size_t kSoftWorkLimit = 1000;
+// Past this, the oldest item nothing waits on goes. Items someone must answer
+// stay: there are never more of them than open requests and apps being raised.
+constexpr std::size_t kWorkLimit = 1000;
 
 void logLine(const std::string& line)
 {
@@ -98,13 +98,19 @@ std::string IntentBroker::pushWork(json item, std::optional<WorkTarget> target)
     const std::string id = m_mintId();
     item["id"] = id;
     const std::string kind = stringAt(item, "kind");
-    const bool notice = kind == "present" || kind == "offer_install" || kind == "completed";
-    if (m_work.size() >= kSoftWorkLimit) {
-        const auto oldest = std::find_if(m_work.begin(), m_work.end(),
-                                         [](const WorkItem& w) { return w.notice; });
+    using Keep = WorkItem::Keep;
+    const Keep keep = kind == "present" || kind == "offer_install" || kind == "completed" ? Keep::Notice
+                    : kind == "result" || kind == "dismiss" ? Keep::Outcome
+                    : Keep::Answer;
+    if (m_work.size() >= kWorkLimit) {
+        auto oldest = std::find_if(m_work.begin(), m_work.end(),
+                                   [](const WorkItem& w) { return w.keep == Keep::Notice; });
+        if (oldest == m_work.end())
+            oldest = std::find_if(m_work.begin(), m_work.end(),
+                                  [](const WorkItem& w) { return w.keep == Keep::Outcome; });
         if (oldest != m_work.end()) m_work.erase(oldest);
     }
-    m_work.push_back(WorkItem{id, notice, std::move(item)});
+    m_work.push_back(WorkItem{id, keep, std::move(item)});
     if (target) m_workTargets[id] = *target;
     ++m_workCounter;
     m_workSignalled = true;
@@ -263,13 +269,18 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     const bool withinLimit = countOpen(requester) < m_config.maxOpenPerRequester
         && m_open.size() < m_config.maxOpenTotal
         && openBytes(requester) + bytes <= m_config.maxOpenBytesPerRequester;
-    if (payloadOk && withinLimit) {
+    const Ticket ticket{r.handle, r.receipt};
+    if (!withinLimit) {
+        logLine("refused " + forLog(intent, 64) + " from " + requester + ": over its open-request limits");
+        holdRefusal(r, err::failed, now);
+        return ticket;
+    }
+    if (payloadOk) {
         r.params = params;
         r.paramsBytes = bytes;
     }
 
     const std::string id = r.dispatchId;
-    const Ticket ticket{r.handle, r.receipt};
     m_byHandle[r.handle] = id;
     m_open.emplace(id, std::move(r));
 
@@ -278,13 +289,36 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     if (!payloadOk) {
         logLine("refused " + forLog(intent, 64) + " from " + requester + ": params are not plain data");
         failWithFloor(id, err::badRequest, Path::Rejected, now);
-    } else if (!withinLimit) {
-        logLine("refused " + forLog(intent, 64) + " from " + requester + ": over its open-request limits");
-        failWithFloor(id, err::failed, Path::Rejected, now);
     } else {
         start(id, now);
     }
     return ticket;
+}
+
+// Kept apart from the open requests, so their limit holds while the refusal
+// waits out its floor. Past as many again, it settles at once.
+void IntentBroker::holdRefusal(const Request& r, const std::string& code, std::int64_t now)
+{
+    const Refusal refusal{r.requester, r.receipt, code, r.acceptedAt + m_config.errorFloorMs, r.fromPresenter};
+    if (now >= refusal.due || m_refused.size() >= m_config.maxOpenTotal) {
+        settleRefusal(r.handle, refusal, now);
+        return;
+    }
+    m_refused[r.handle] = refusal;
+}
+
+void IntentBroker::settleRefusal(const std::string& handle, const Refusal& refusal, std::int64_t now)
+{
+    json envelope = makeEnvelope(false, json(), refusal.code);
+    if (refusal.fromPresenter) {
+        pushWork(json{{"kind", "result"}, {"handle", handle}, {"result", std::move(envelope)}});
+        return;
+    }
+    keepResult(refusal.requester, handle, refusal.receipt, std::move(envelope), now);
+    Effect e;
+    e.kind = Effect::Kind::Settled;
+    e.handle = handle;
+    m_effects.push_back(std::move(e));
 }
 
 void IntentBroker::start(const std::string& id, std::int64_t now)
@@ -660,6 +694,12 @@ json IntentBroker::result(const std::string& requester, const std::string& handl
             return unknown;
         return json{{"ok", true}, {"state", "settled"}, {"result", s->second.envelope}};
     }
+    if (const auto f = m_refused.find(handle); f != m_refused.end()) {
+        if (f->second.fromPresenter || f->second.requester != requester
+            || !sameSecret(f->second.receipt, receipt))
+            return unknown;
+        return json{{"ok", true}, {"state", "pending"}};
+    }
     const auto h = m_byHandle.find(handle);
     if (h == m_byHandle.end()) return unknown;
     const auto o = m_open.find(h->second);
@@ -677,6 +717,16 @@ bool IntentBroker::cancel(const std::string& requester, const std::string& handl
         if (s->second.requester != requester || !sameSecret(s->second.receipt, receipt))
             return false;
         eraseSettled(s);
+        return true;
+    }
+    if (const auto f = m_refused.find(handle); f != m_refused.end()) {
+        if (f->second.fromPresenter || f->second.requester != requester
+            || !sameSecret(f->second.receipt, receipt))
+            return false;
+        Refusal withdrawn = f->second;
+        m_refused.erase(f);
+        withdrawn.code = err::cancelled;
+        settleRefusal(handle, withdrawn, now);
         return true;
     }
     const auto h = m_byHandle.find(handle);
@@ -804,7 +854,8 @@ void IntentBroker::eraseSettled(std::map<std::string, Settled>::iterator it)
     m_settled.erase(it);
 }
 
-void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
+void IntentBroker::keepResult(const std::string& requester, const std::string& handle,
+                              const std::string& receipt, json envelope, std::int64_t now)
 {
     const std::size_t bytes = approxBytes(envelope);
     // Make room: the requester's own oldest results first, then anyone's.
@@ -813,7 +864,7 @@ void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
         std::size_t held = 0;
         auto oldest = m_settled.end();
         for (auto s = m_settled.begin(); s != m_settled.end(); ++s) {
-            if (s->second.requester != r.requester) continue;
+            if (s->second.requester != requester) continue;
             ++count;
             held += s->second.bytes;
             if (oldest == m_settled.end() || s->second.at < oldest->second.at) oldest = s;
@@ -829,7 +880,7 @@ void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
             if (s->second.at < oldest->second.at) oldest = s;
         eraseSettled(oldest);
     }
-    m_settled[r.handle] = Settled{r.requester, r.receipt, std::move(envelope), now, bytes};
+    m_settled[handle] = Settled{requester, receipt, std::move(envelope), now, bytes};
     m_resultBytesTotal += bytes;
 }
 
@@ -859,7 +910,7 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
         m_byHandle.erase(r.handle);
         pushWork(json{{"kind", "result"}, {"handle", r.handle}, {"result", std::move(envelope)}});
     } else {
-        keepResult(r, std::move(envelope), now);
+        keepResult(r.requester, r.handle, r.receipt, std::move(envelope), now);
         Effect e;
         e.kind = Effect::Kind::Settled;
         e.handle = r.handle;
@@ -920,6 +971,17 @@ void IntentBroker::tick(std::int64_t now)
                 finish(id, false, json(), err::timeout, Path::Deadline, now);
             break;
         }
+    }
+
+    for (auto it = m_refused.begin(); it != m_refused.end();) {
+        if (now < it->second.due) {
+            ++it;
+            continue;
+        }
+        const std::string handle = it->first;
+        const Refusal refusal = it->second;
+        it = m_refused.erase(it);
+        settleRefusal(handle, refusal, now);
     }
 
     for (auto it = m_settled.begin(); it != m_settled.end();) {

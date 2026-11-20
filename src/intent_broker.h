@@ -207,9 +207,21 @@ private:
     };
 
     struct WorkItem {
+        // What a full queue may drop: a notice first, then an outcome the
+        // presenter would only read. An item someone must answer, never.
+        enum class Keep { Notice, Outcome, Answer };
         std::string id;
-        bool notice = false;   // nothing waits on it: safe to drop
+        Keep keep = Keep::Answer;
         json item;
+    };
+
+    // Over its limits: answered only after the floor, from outside the open requests.
+    struct Refusal {
+        std::string requester;
+        std::string receipt;
+        std::string code;
+        std::int64_t due = 0;
+        bool fromPresenter = false;
     };
 
     struct Activation {
@@ -233,7 +245,10 @@ private:
     void failWithFloor(const std::string& id, const std::string& code, Path path, std::int64_t now);
     void finish(const std::string& id, bool ok, const json& data, const std::string& error,
                 Path path, std::int64_t now);
-    void keepResult(const Request& r, json envelope, std::int64_t now);
+    void keepResult(const std::string& requester, const std::string& handle, const std::string& receipt,
+                    json envelope, std::int64_t now);
+    void holdRefusal(const Request& r, const std::string& code, std::int64_t now);
+    void settleRefusal(const std::string& handle, const Refusal& refusal, std::int64_t now);
     void eraseSettled(std::map<std::string, Settled>::iterator it);
     void drainActivation(const std::string& app, bool ready, std::int64_t now);
     void endActivation(const std::string& app);
@@ -251,6 +266,7 @@ private:
     std::map<std::string, Request> m_open;            // dispatch id -> request
     std::map<std::string, std::string> m_byHandle;    // handle -> dispatch id
     std::map<std::string, Settled> m_settled;         // handle -> result
+    std::map<std::string, Refusal> m_refused;         // handle -> refusal held to its floor
     std::size_t m_resultBytesTotal = 0;
     std::map<std::string, std::string> m_configured;  // intent -> provider (headless)
     std::map<std::string, Backend> m_backends;        // app -> backend

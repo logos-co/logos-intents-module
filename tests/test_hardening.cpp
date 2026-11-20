@@ -521,6 +521,17 @@ LOGOS_TEST(requests_past_the_rate_are_refused_in_the_reply)
     LOGOS_ASSERT_EQ(admitted, 20);
 }
 
+// Each of the presenter's own requests ends as a work item, so they have a rate too.
+LOGOS_TEST(the_presenters_own_requests_have_a_rate_too)
+{
+    Basecamp h("interactive");
+    int admitted = 0;
+    const CallCaller host = CallCaller::host();
+    for (int i = 0; i < 100; ++i)
+        if (h.call(h.service->shellRequest(h.secret, "packages.show", "{}", false))["ok"].get<bool>()) ++admitted;
+    LOGOS_ASSERT_EQ(admitted, 20);
+}
+
 LOGOS_TEST(settled_is_never_sent_before_the_request_returns)
 {
     BrokerConfig instant;

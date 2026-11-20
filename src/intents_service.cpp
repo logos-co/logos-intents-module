@@ -447,6 +447,8 @@ std::string IntentsService::shellRequest(const std::string& secret, const std::s
         if (!presenterCall(secret, "shell_request")) return refusal("refused");
         const std::string requester = asLink ? m_registry.linkName() : m_registry.shellName();
         if (requester.empty()) return refusal(err::notDeclared);
+        // Each one ends as a work item, so the presenter's own requests have a rate too.
+        if (!m_broker.admit(requester, m_clock())) return refusal(err::failed);
         const json params = paramsJson.empty() ? json::object() : parseBounded(paramsJson, kPayloadLimits);
         const IntentBroker::Ticket t = m_broker.submit(requester, intent, params, /*clicked=*/true,
                                                        /*fromPresenter=*/true, m_clock());

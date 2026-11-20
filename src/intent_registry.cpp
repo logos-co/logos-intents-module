@@ -175,6 +175,7 @@ void IntentRegistry::declareShell(const std::string& shellName,
             it = intentSet.erase(it);
         }
     }
+    recomputeInstallable();
 }
 
 void IntentRegistry::resetPackages()
@@ -188,7 +189,6 @@ void IntentRegistry::resetPackages()
     m_webReachable.clear();
     m_webIntents.clear();
     m_diagnostics.clear();
-    m_installableInput.reset();
     installShell();
 }
 
@@ -210,6 +210,7 @@ void IntentRegistry::rebuild(const std::vector<LoadedPackage>& packages)
     // Only what is installed: a package back after an uninstall is a new one.
     for (auto it = m_seen.begin(); it != m_seen.end();)
         it = m_types.count(it->first) ? std::next(it) : m_seen.erase(it);
+    recomputeInstallable();
 }
 
 std::vector<std::string> IntentRegistry::parseUses(const json* raw, const std::string& name)
@@ -498,10 +499,18 @@ bool IntentRegistry::setInstallable(const std::map<std::string, std::vector<std:
         && m_installableInput->second == webByName)
         return false;
     m_installableInput.emplace(byName, webByName);
+    recomputeInstallable();
+    return true;
+}
 
+// Derived from the catalogue and from what is installed, so redone when either changes.
+void IntentRegistry::recomputeInstallable()
+{
     m_installable.clear();
     m_installableWeb.clear();
     m_installableWebIntents.clear();
+    if (!m_installableInput) return;
+    const auto& [byName, webByName] = *m_installableInput;
     for (const auto& [name, intentList] : byName) {
         // Installed packages are answered by the real table.
         if (!isValidPackageName(name) || m_types.count(name)) continue;
@@ -521,7 +530,6 @@ bool IntentRegistry::setInstallable(const std::map<std::string, std::vector<std:
         }
     }
     for (auto& [intent, names] : m_installable) std::sort(names.begin(), names.end());
-    return true;
 }
 
 std::vector<std::string> IntentRegistry::installableFor(const std::string& requester,

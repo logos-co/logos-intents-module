@@ -33,6 +33,7 @@ of name. Neither is a `logosctl` user before the host has claimed.
 |---|---|---|
 | In Basecamp, a request with no click waits in the pending list before anything is resolved, so asking reveals nothing about what is installed | `IntentBroker::start` | `unclicked_requests_reveal_nothing_about_what_is_installed`, `unclicked_requests_wait_alike_whatever_is_installed` |
 | Install offers only for clicked or opened requests, once per intent a minute | `offerInstall` | `install_offers_need_a_click`, `an_install_offer_needs_a_click_and_comes_once_a_minute` |
+| Install offers follow what is installed: the catalogue is kept, and the offers (links' web intents among them) are worked out again on every `set_installed` and `declare_shell` | `IntentRegistry::recomputeInstallable` | `install_offers_follow_what_is_installed` |
 | `unavailable` for absent, denied, unreachable and unloaded alike, never before 400 ms (15) | `failWithFloor` | `nothing_provides_it_is_unavailable_but_only_after_the_floor` |
 | One provider isn't a reason to skip the chooser, for the shell's own requests too; only the shell as the provider is | `IntentBroker::start` | `a_shell_request_with_one_package_provider_still_asks` |
 | One chooser at a time; one shown gets its full 10 minutes from when it's shown | `presentChoice`, `showChoice` | `only_one_choice_is_on_screen_and_the_next_follows`, `a_queued_choice_gets_its_full_time_once_shown` |

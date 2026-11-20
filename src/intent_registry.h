@@ -140,6 +140,7 @@ private:
 
     bool isReservedNamespace(const std::string& intent) const;
     void resetPackages();
+    void recomputeInstallable();
     void installShell();
     void dropPackage(const std::string& name);
     void diagnose(const std::string& line);

@@ -178,6 +178,65 @@ LOGOS_TEST(an_app_provider_is_activated_then_delivered_to_its_backend)
     LOGOS_ASSERT_EQ(completed[0]["by"].get<std::string>(), std::string("provider"));
 }
 
+// Nothing may raise an app once no request waits on it.
+LOGOS_TEST(an_activation_nobody_waits_for_is_taken_back)
+{
+    World w;
+    const auto unpulled = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    w.broker.cancel("wallet_module", unpulled.handle, unpulled.receipt, w.now);
+    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "activate").empty());
+
+    // Pulled: the presenter is told to take it down, and it can't be answered.
+    const auto pulled = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    const auto activate = workOfKind(w.broker.takeWork(), "activate");
+    LOGOS_ASSERT_EQ(activate.size(), std::size_t(1));
+    w.broker.cancel("wallet_module", pulled.handle, pulled.receipt, w.now);
+    const auto dismiss = workOfKind(w.broker.takeWork(), "dismiss");
+    LOGOS_ASSERT_EQ(dismiss.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(dismiss[0]["work"].get<std::string>(), activate[0]["id"].get<std::string>());
+    LOGOS_ASSERT_FALSE(w.broker.answer(activate[0]["id"].get<std::string>(), json{{"action", "failed"}}, w.now));
+}
+
+LOGOS_TEST(an_activation_stays_while_a_request_still_waits_on_it)
+{
+    World w;
+    const auto first = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    w.now += 1;
+    const auto second = w.ask();
+    const json work = w.broker.takeWork();
+    const auto activate = workOfKind(work, "activate");
+    LOGOS_ASSERT_EQ(activate.size(), std::size_t(1));
+    w.broker.answer(workOfKind(work, "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "activate").empty());   // asked once
+
+    w.broker.cancel("wallet_module", first.handle, first.receipt, w.now);
+    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "dismiss").empty());
+    w.broker.cancel("wallet_module", second.handle, second.receipt, w.now);
+    const auto dismiss = workOfKind(w.broker.takeWork(), "dismiss");
+    LOGOS_ASSERT_EQ(dismiss.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(dismiss[0]["work"].get<std::string>(), activate[0]["id"].get<std::string>());
+}
+
+LOGOS_TEST(a_backend_that_comes_up_first_leaves_no_activation_behind)
+{
+    World w;
+    w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
+    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
+    const json work = w.broker.takeWork();
+    LOGOS_ASSERT_TRUE(workOfKind(work, "activate").empty());
+    LOGOS_ASSERT_EQ(workOfKind(work, "present").size(), std::size_t(1));
+}
+
 LOGOS_TEST(only_the_module_delivered_to_may_respond)
 {
     World w(Attention::Headless, true);

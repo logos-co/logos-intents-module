@@ -471,12 +471,12 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
         } else {
             r->phase = Phase::Activating;
             r->phaseSince = now;
-            std::vector<std::string>& queue = m_activation[provider];
-            const bool alreadyAsked = !queue.empty();
-            queue.push_back(id);
+            Activation& activation = m_activation[provider];
+            const bool alreadyAsked = !activation.ids.empty();
+            activation.ids.push_back(id);
             if (!alreadyAsked)
-                pushWork(json{{"kind", "activate"}, {"app", provider}},
-                         WorkTarget{WorkKind::Activate, provider});
+                activation.workId = pushWork(json{{"kind", "activate"}, {"app", provider}},
+                                             WorkTarget{WorkKind::Activate, provider});
         }
     } else {
         failWithFloor(id, err::unavailable, Path::Rejected, now);
@@ -490,14 +490,8 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
 {
     const auto q = m_activation.find(app);
     if (q == m_activation.end()) return;
-    const std::vector<std::string> ids = q->second;
-    m_activation.erase(q);
-    for (auto it = m_workTargets.begin(); it != m_workTargets.end();) {
-        if (it->second.kind == WorkKind::Activate && it->second.target == app)
-            it = m_workTargets.erase(it);
-        else
-            ++it;
-    }
+    const std::vector<std::string> ids = q->second.ids;
+    endActivation(app);
     for (const std::string& id : ids) {
         Request* r = find(id);
         if (!r || r->phase != Phase::Activating || r->floor) continue;
@@ -510,6 +504,16 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
             failWithFloor(id, err::unavailable, Path::EndpointGone, now);
         }
     }
+}
+
+void IntentBroker::endActivation(const std::string& app)
+{
+    const auto a = m_activation.find(app);
+    if (a == m_activation.end()) return;
+    const std::string workId = a->second.workId;
+    m_activation.erase(a);
+    // Not pulled: taken back. Pulled and unanswered: the presenter takes it down.
+    dropWorkTarget(workId);
 }
 
 std::string IntentBroker::specViolation(const std::string& provider, const std::string& intent,
@@ -692,17 +696,18 @@ bool IntentBroker::answer(const std::string& workId, const json& answer, std::in
         selectProvider(target.target, provider, now);
         return true;
     }
-    case WorkKind::Activate:
-        if (action == "activated") {
-            // Ready only once its backend is registered; until then it waits.
-            if (m_backends.count(target.target)) drainActivation(target.target, true, now);
-            return true;
-        }
-        if (action == "failed") {
-            drainActivation(target.target, false, now);
-            return true;
-        }
-        return false;
+    case WorkKind::Activate: {
+        if (action != "activated" && action != "failed") return false;
+        // Ready only once its backend is registered; until then it waits.
+        const bool ready = action == "activated";
+        if (ready && !m_backends.count(target.target)) return true;
+        // Answered, so there is nothing left on screen to take down.
+        m_workTargets.erase(workId);
+        const auto a = m_activation.find(target.target);
+        if (a != m_activation.end() && a->second.workId == workId) a->second.workId.clear();
+        drainActivation(target.target, ready, now);
+        return true;
+    }
     case WorkKind::Pending: {
         Request* r = find(target.target);
         if (!r || r->phase != Phase::Pending || r->floor) return false;
@@ -808,10 +813,12 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
     if (!r.pendingWorkId.empty()) dropWorkTarget(r.pendingWorkId);
     if (!r.deliverWorkId.empty()) dropWorkTarget(r.deliverWorkId);
     if (!r.provider.empty()) {
-        const auto q = m_activation.find(r.provider);
-        if (q != m_activation.end()) {
-            q->second.erase(std::remove(q->second.begin(), q->second.end(), id), q->second.end());
-            if (q->second.empty()) m_activation.erase(q);
+        const auto a = m_activation.find(r.provider);
+        if (a != m_activation.end()) {
+            std::vector<std::string>& ids = a->second.ids;
+            ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+            // The last one waiting: nothing may raise the app for it now.
+            if (ids.empty()) endActivation(r.provider);
         }
     }
 

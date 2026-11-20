@@ -35,6 +35,7 @@ of name. Neither is a `logosctl` user before the host has claimed.
 | `unavailable` for absent, denied, unreachable and unloaded alike, never before 400 ms (15) | `failWithFloor` | `nothing_provides_it_is_unavailable_but_only_after_the_floor` |
 | One provider isn't a reason to skip the chooser, for the shell's own requests too; only the shell as the provider is | `IntentBroker::start` | `a_shell_request_with_one_package_provider_still_asks` |
 | One chooser at a time; one shown gets its full 10 minutes from when it's shown | `presentChoice`, `showChoice` | `only_one_choice_is_on_screen_and_the_next_follows`, `a_queued_choice_gets_its_full_time_once_shown` |
+| An app is raised only while a request waits on it: its `activate` goes with the last one, taken back if not pulled, dismissed if it was | `endActivation` | `an_activation_nobody_waits_for_is_taken_back`, `an_activation_stays_while_a_request_still_waits_on_it`, `a_backend_that_comes_up_first_leaves_no_activation_behind` |
 | Names a presenter may draw are stripped of control, bidirectional, zero-width and line-separator characters (5) | `displaySafe` | `display_text_loses_control_characters`, `work_items_show_display_safe_names` |
 | No method lists providers; choosers reach only the presenter (6) | API | — |
 | A headless daemon uses only providers the host named, and logs every change (11) | `configureProvider` | `headless_uses_only_a_configured_provider` |

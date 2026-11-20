@@ -211,6 +211,11 @@ private:
         json item;
     };
 
+    struct Activation {
+        std::vector<std::string> ids;   // the requests waiting on the app
+        std::string workId;             // its `activate`, until the presenter answers
+    };
+
     std::string backendRefusal(const std::string& app, const std::string& module) const;
     void start(const std::string& id, std::int64_t now);
     void park(const std::string& id, std::int64_t now);
@@ -230,6 +235,7 @@ private:
     void keepResult(const Request& r, json envelope, std::int64_t now);
     void eraseSettled(std::map<std::string, Settled>::iterator it);
     void drainActivation(const std::string& app, bool ready, std::int64_t now);
+    void endActivation(const std::string& app);
     std::string pushWork(json item, std::optional<WorkTarget> target = std::nullopt);
     void dropWorkTarget(const std::string& workId);
     Request* find(const std::string& id);
@@ -248,7 +254,7 @@ private:
     std::map<std::string, std::string> m_configured;  // intent -> provider (headless)
     std::map<std::string, Backend> m_backends;        // app -> backend
     std::uint64_t m_backendGeneration = 0;
-    std::map<std::string, std::vector<std::string>> m_activation;   // app -> dispatch ids
+    std::map<std::string, Activation> m_activation;   // app -> its activation
     std::map<std::string, Bucket> m_buckets;          // requester -> request tokens
     std::map<std::string, std::int64_t> m_lastOffer;  // intent -> last install offer
 

@@ -84,9 +84,9 @@ public:
     void ingest(const std::string& name, const json& metadata,
                 const std::string& displayName, const std::string& iconSource);
 
-    // Only `requesters` may ask for `intent`. Survives rebuild().
-    void restrictIntentToRequesters(const std::string& intent,
-                                    const std::vector<std::string>& requesters);
+    // Only the listed requesters may ask for each intent. The whole set,
+    // replacing the last one; survives rebuild().
+    void setRestrictions(const std::map<std::string, std::vector<std::string>>& restricted);
     bool requesterAllowed(const std::string& intent, const std::string& requester) const;
 
     Resolution resolve(const std::string& intent) const;

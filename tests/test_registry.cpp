@@ -139,11 +139,15 @@ LOGOS_TEST(installable_never_lists_installed_or_reserved)
 LOGOS_TEST(restricted_intents_admit_only_their_requesters)
 {
     IntentRegistry r;
-    r.restrictIntentToRequesters("pkg.remove", {"pm_ui"});
-    r.restrictIntentToRequesters("pkg.other", {});
+    r.setRestrictions({{"pkg.remove", {"pm_ui"}}, {"pkg.other", {}}});
     LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.remove", "pm_ui"));
     LOGOS_ASSERT_FALSE(r.requesterAllowed("pkg.remove", "wallet_ui"));
     LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.other", "anyone"));   // the empty list was refused
+
+    // The next set replaces this one.
+    r.setRestrictions({{"pkg.other", {"pm_ui"}}});
+    LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.remove", "wallet_ui"));
+    LOGOS_ASSERT_FALSE(r.requesterAllowed("pkg.other", "wallet_ui"));
 }
 
 LOGOS_TEST(rebuild_reads_disk_and_checks_the_name)

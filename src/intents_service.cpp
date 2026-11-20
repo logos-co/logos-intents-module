@@ -412,6 +412,16 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
     const json* link = findKey(shell, "link");
     const std::string linkName = link ? stringAt(*link, "name") : std::string();
     if (link && (!isValidPackageName(linkName) || linkName == name)) return bad();
+    // Replaced whole, so read whole first: one that can't be leaves the last standing.
+    std::map<std::string, std::vector<std::string>> restricted;
+    if (const json* given = findKey(shell, "restricted")) {
+        if (!given->is_object()) return bad();
+        for (auto it = given->begin(); it != given->end(); ++it) {
+            std::vector<std::string> requesters = stringList(&it.value());
+            if (!isValidName(it.key()) || requesters.empty()) return bad();
+            restricted[it.key()] = std::move(requesters);
+        }
+    }
 
     m_registry.declareShell(name, prefix,
                             stringList(findKey(shell, "uses")),
@@ -419,9 +429,7 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
                             stringList(findKey(shell, "handoff")),
                             stringAt(shell, "displayName"),
                             stringAt(shell, "iconSource"));
-    if (const json* restricted = findKey(shell, "restricted"); restricted && restricted->is_object())
-        for (auto it = restricted->begin(); it != restricted->end(); ++it)
-            m_registry.restrictIntentToRequesters(it.key(), stringList(&it.value()));
+    m_registry.setRestrictions(restricted);
     if (link) m_registry.registerLinkRequester(linkName, stringList(findKey(*link, "webIntents")));
     m_broker.dropStaleBackends(m_clock());
     return json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};

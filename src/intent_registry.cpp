@@ -358,16 +358,18 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
     if (!uses.empty()) m_uses[name] = std::set<std::string>(uses.begin(), uses.end());
 }
 
-void IntentRegistry::restrictIntentToRequesters(const std::string& intent,
-                                                const std::vector<std::string>& requesters)
+void IntentRegistry::setRestrictions(const std::map<std::string, std::vector<std::string>>& restricted)
 {
-    if (intent.empty()) return;
-    // An empty list would store as "unrestricted".
-    if (requesters.empty()) {
-        diagnose("shell: refusing an empty requester list for '" + forLog(intent) + "'");
-        return;
+    m_restricted.clear();
+    for (const auto& [intent, requesters] : restricted) {
+        if (intent.empty()) continue;
+        // An empty list would store as "unrestricted".
+        if (requesters.empty()) {
+            diagnose("shell: refusing an empty requester list for '" + forLog(intent) + "'");
+            continue;
+        }
+        m_restricted[intent] = requesters;
     }
-    m_restricted[intent] = requesters;
 }
 
 bool IntentRegistry::requesterAllowed(const std::string& intent, const std::string& requester) const

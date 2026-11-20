@@ -23,6 +23,7 @@ of name. Neither is a `logosctl` user before the host has claimed.
 | A backend name that is an installed package, the shell or the link requester is refused (9), and a registration is dropped as soon as a later `set_installed` or `declare_shell` would refuse it | `IntentBroker::registerBackend`, `dropStaleBackends` | `a_backend_name_that_belongs_to_a_package_is_refused`, `a_package_installed_under_a_backends_name_is_not_the_app`, `an_uninstalled_apps_backend_is_dropped`, `a_shell_declared_under_a_backends_name_drops_the_backend` |
 | `respond` only from the module the dispatch went to, and only while it is still that app's backend (6) | `IntentBroker::respond` | `respond_is_accepted_only_from_the_module_delivered_to`, `a_backend_unregistered_after_delivery_cannot_respond` |
 | Results need the requester's identity and receipt; `settled` carries a handle only (2) | `IntentBroker::result` | `the_settled_event_carries_only_the_handle`, `another_module_cannot_read_a_result` |
+| Each shell declaration replaces its restrictions whole; one whose `restricted` can't be read (not an object, an empty list) is refused and changes nothing | `IntentsService::declareShellLocked`, `IntentRegistry::setRestrictions` | `a_shell_declaration_replaces_its_restrictions_whole`, `restricted_intents_admit_only_their_requesters` |
 | `logos.` and the shell's namespace can't be provided by a package, even one read before the shell was declared | `IntentRegistry` | `reserved_namespaces_are_refused_from_packages`, `a_late_shell_or_link_declaration_still_applies` |
 | A package's `metadata.json` must carry the name the host registered; names are `[A-Za-z0-9_.-]{1,64}` | `IntentRegistry::rebuild`, `isValidPackageName` | `rebuild_reads_disk_and_checks_the_name`, `package_names_with_anything_but_plain_characters_are_skipped` |
 
@@ -73,7 +74,8 @@ of name. Neither is a `logosctl` user before the host has claimed.
   installed first makes the app's own backend unregistrable.
 - **Restrict the shell's confirm intents.** Any package that declares a shell
   intent may ask for it. List every `confirm_*` intent under `restricted`
-  (Basecamp's declaration leaves out `basecamp.packages.confirm_install`).
+  (Basecamp's declaration leaves out `basecamp.packages.confirm_install`), in
+  every declaration: each one replaces the last whole.
 - **Who holds `Host`.** `capability_module`, and on logos-protocol below 0.7
   Basecamp's in-process QML views, call as `Host` too. The claim right after
   loading, including after a restart of `intents_module`, is what keeps them

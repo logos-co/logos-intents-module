@@ -169,6 +169,7 @@ private:
 
         bool choicePresented = false;
         json choiceProviders = json::array();
+        std::map<std::string, std::uint64_t> choiceRevisions;   // provider -> revision shown
         std::string choiceWorkId;
         std::string pendingWorkId;
         std::string deliverWorkId;
@@ -220,9 +221,9 @@ private:
     void start(const std::string& id, std::int64_t now);
     void park(const std::string& id, std::int64_t now);
     void offerInstall(const std::string& requester, const std::string& intent, std::int64_t now);
-    void presentChoice(const std::string& id, const std::vector<IntentRegistry::ProviderEntry>& found,
-                       std::int64_t now);
-    void showChoice(Request& r, std::int64_t now);
+    void presentChoice(const std::string& id, std::int64_t now);
+    bool showChoice(const std::string& id, std::int64_t now);
+    bool stillEligible(const Request& r, const std::string& provider) const;
     void presentNextChoice(std::int64_t now);
     bool aChoiceIsOnScreen() const;
     void selectProvider(const std::string& id, const std::string& provider, std::int64_t now);

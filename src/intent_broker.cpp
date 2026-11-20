@@ -353,7 +353,7 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
         }
     }
 
-    presentChoice(id, resolution.found, now);
+    presentChoice(id, now);
 }
 
 void IntentBroker::park(const std::string& id, std::int64_t now)
@@ -394,50 +394,75 @@ bool IntentBroker::aChoiceIsOnScreen() const
     return false;
 }
 
-void IntentBroker::presentChoice(const std::string& id,
-                                 const std::vector<IntentRegistry::ProviderEntry>& found,
-                                 std::int64_t now)
+void IntentBroker::presentChoice(const std::string& id, std::int64_t now)
 {
     Request* r = find(id);
     if (!r) return;
-    json providers = json::array();
-    for (const IntentRegistry::ProviderEntry& e : found) {
-        providers.push_back(json{{"module", e.moduleName},
-                                 {"displayName", displaySafe(e.displayName)},
-                                 {"iconSource", e.iconSource}});
-    }
     r->phase = Phase::AwaitingChoice;
     r->phaseSince = now;
-    r->choiceProviders = providers;
 
     // Queue, never re-point a chooser that is showing: a click meant for the
     // request the person read would answer the one that just arrived.
     if (aChoiceIsOnScreen()) return;
-    showChoice(*r, now);
+    showChoice(id, now);
 }
 
-void IntentBroker::showChoice(Request& r, std::int64_t now)
+// Resolved when shown, not when queued: the person sees what is there now.
+// False when nothing is, and the request fails instead.
+bool IntentBroker::showChoice(const std::string& id, std::int64_t now)
 {
-    r.choicePresented = true;
-    r.phaseSince = now;   // the person's time starts when it's shown
-    r.choiceWorkId = pushWork(json{{"kind", "choose"},
-                                   {"dispatch", r.dispatchId},
-                                   {"intent", r.intent},
-                                   {"requester", displaySafe(r.requester)},
-                                   {"providers", r.choiceProviders}},
-                              WorkTarget{WorkKind::Choose, r.dispatchId});
+    Request* r = find(id);
+    if (!r) return false;
+    const IntentRegistry::Resolution current = m_registry.resolveFor(r->requester, r->intent);
+    if (current.found.empty() || !m_registry.requesterAllowed(r->intent, r->requester)) {
+        failWithFloor(id, err::unavailable, Path::Rejected, now);
+        return false;
+    }
+    json providers = json::array();
+    r->choiceRevisions.clear();
+    for (const IntentRegistry::ProviderEntry& e : current.found) {
+        providers.push_back(json{{"module", e.moduleName},
+                                 {"displayName", displaySafe(e.displayName)},
+                                 {"iconSource", e.iconSource}});
+        r->choiceRevisions[e.moduleName] = m_registry.revisionOf(e.moduleName);
+    }
+    r->choiceProviders = providers;
+    r->choicePresented = true;
+    r->phaseSince = now;   // the person's time starts when it's shown
+    r->choiceWorkId = pushWork(json{{"kind", "choose"},
+                                    {"dispatch", id},
+                                    {"intent", r->intent},
+                                    {"requester", displaySafe(r->requester)},
+                                    {"providers", providers}},
+                               WorkTarget{WorkKind::Choose, id});
+    return true;
 }
 
 void IntentBroker::presentNextChoice(std::int64_t now)
 {
-    if (aChoiceIsOnScreen()) return;
-    // Oldest first, so which request the person answers doesn't depend on map order.
-    Request* oldest = nullptr;
-    for (auto& [id, r] : m_open) {
-        if (r.phase != Phase::AwaitingChoice || r.choicePresented || r.floor) continue;
-        if (!oldest || r.acceptedAt < oldest->acceptedAt) oldest = &r;
+    while (!aChoiceIsOnScreen()) {
+        // Oldest first, so which request the person answers doesn't depend on map order.
+        const Request* oldest = nullptr;
+        for (const auto& [id, r] : m_open) {
+            if (r.phase != Phase::AwaitingChoice || r.choicePresented || r.floor) continue;
+            if (!oldest || r.acceptedAt < oldest->acceptedAt) oldest = &r;
+        }
+        if (!oldest) return;
+        const std::string id = oldest->dispatchId;
+        if (showChoice(id, now)) return;
     }
-    if (oldest) showChoice(*oldest, now);
+}
+
+// What made the provider one to show: still allowed, still reachable by this
+// requester, and still the package that was shown.
+bool IntentBroker::stillEligible(const Request& r, const std::string& provider) const
+{
+    const auto shown = r.choiceRevisions.find(provider);
+    if (shown == r.choiceRevisions.end() || shown->second != m_registry.revisionOf(provider)) return false;
+    if (!m_registry.requesterAllowed(r.intent, r.requester)) return false;
+    const IntentRegistry::Resolution current = m_registry.resolveFor(r.requester, r.intent);
+    return std::any_of(current.found.begin(), current.found.end(),
+                       [&](const IntentRegistry::ProviderEntry& e) { return e.moduleName == provider; });
 }
 
 void IntentBroker::selectProvider(const std::string& id, const std::string& provider,
@@ -689,10 +714,17 @@ bool IntentBroker::answer(const std::string& workId, const json& answer, std::in
         // Only one of the providers the person was shown.
         const bool offered = std::any_of(r->choiceProviders.begin(), r->choiceProviders.end(),
                                          [&](const json& p) { return stringAt(p, "module") == provider; });
-        if (provider.empty() || !offered || !m_registry.declaresProvide(provider, r->intent)) return false;
+        if (provider.empty() || !offered) return false;
         m_workTargets.erase(workId);
         r->choicePresented = false;
         r->choiceWorkId.clear();
+        // The registry may have changed under the chooser: ask again rather than
+        // deliver to what the person didn't see.
+        if (!stillEligible(*r, provider)) {
+            logLine(provider + " changed while the chooser for " + r->intent + " was open: asking again");
+            if (!showChoice(target.target, now)) presentNextChoice(now);
+            return true;
+        }
         selectProvider(target.target, provider, now);
         return true;
     }

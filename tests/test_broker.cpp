@@ -178,6 +178,98 @@ LOGOS_TEST(an_app_provider_is_activated_then_delivered_to_its_backend)
     LOGOS_ASSERT_EQ(completed[0]["by"].get<std::string>(), std::string("provider"));
 }
 
+namespace {
+
+// What set_installed does: the registry rebuilt from these packages alone.
+void reinstall(World& w, const std::vector<json>& packages)
+{
+    std::vector<LoadedPackage> loaded;
+    for (const json& p : packages)
+        loaded.push_back(LoadedPackage{p["name"].get<std::string>(), "", "", p, ""});
+    w.registry.rebuild(loaded);
+}
+
+json walletPackage()
+{
+    return pkg("wallet_module", "core", json::array(),
+               intentList({"signing.approve", "basecamp.settings.open", "nobody.provides"}));
+}
+
+json signerUiPackage()
+{
+    return pkg("signer_ui", "ui_qml", json::array({json{
+        {"intent", "signing.approve"},
+        {"params", json::array({json{{"name", "handle"}, {"type", "string"}, {"required", true}}})},
+    }}));
+}
+
+json webProvider(const std::string& name, bool web)
+{
+    return pkg(name, "core", json::array({json{{"intent", "share.text"}, {"web", web}}}));
+}
+
+} // namespace
+
+// A provider re-read with other metadata while the chooser was open isn't the
+// one the person picked: they're asked again.
+LOGOS_TEST(a_provider_changed_under_the_chooser_is_offered_again)
+{
+    World w(Attention::Immediate, /*twoProviders=*/true);
+    w.ask();
+    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    json changed = pkg("cli_signer", "core", intentList({"signing.approve"}));
+    changed["version"] = "2.0.0";
+    reinstall(w, {walletPackage(), signerUiPackage(), changed});
+
+    LOGOS_ASSERT_TRUE(w.broker.answer(shown[0]["id"].get<std::string>(),
+                                      json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    const auto again = workOfKind(w.broker.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(again.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(again[0]["dispatch"].get<std::string>(), shown[0]["dispatch"].get<std::string>());
+
+    LOGOS_ASSERT_TRUE(w.broker.answer(again[0]["id"].get<std::string>(),
+                                      json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
+    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
+}
+
+LOGOS_TEST(a_queued_chooser_shows_the_providers_of_the_moment_it_comes_up)
+{
+    World w(Attention::Immediate, /*twoProviders=*/true);
+    w.ask();
+    w.now += 1;
+    w.ask();
+    const auto first = workOfKind(w.broker.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(first.size(), std::size_t(1));
+    reinstall(w, {walletPackage(), signerUiPackage()});   // cli_signer uninstalled
+
+    w.broker.answer(first[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now);
+    const auto next = workOfKind(w.broker.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(next.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(next[0]["providers"].size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(next[0]["providers"][0]["module"].get<std::string>(), std::string("signer_ui"));
+}
+
+// A link reaches only providers that opted in, at the moment the person picks.
+LOGOS_TEST(a_link_request_cannot_go_to_a_provider_that_dropped_web)
+{
+    World w(Attention::Interactive);
+    w.registry.registerLinkRequester("basecamp_link", {});
+    reinstall(w, {walletPackage(), signerUiPackage(), webProvider("share_a", true), webProvider("share_b", true)});
+    w.broker.submit("basecamp_link", "share.text", json::object(), false, /*fromPresenter=*/true, w.now);
+    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(shown[0]["providers"].size(), std::size_t(2));
+
+    reinstall(w, {walletPackage(), signerUiPackage(), webProvider("share_a", false), webProvider("share_b", true)});
+    LOGOS_ASSERT_TRUE(w.broker.answer(shown[0]["id"].get<std::string>(),
+                                      json{{"action", "choose"}, {"provider", "share_a"}}, w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    const auto again = workOfKind(w.broker.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(again.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(again[0]["providers"].size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(again[0]["providers"][0]["module"].get<std::string>(), std::string("share_b"));
+}
+
 // Nothing may raise an app once no request waits on it.
 LOGOS_TEST(an_activation_nobody_waits_for_is_taken_back)
 {

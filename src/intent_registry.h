@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -107,6 +108,9 @@ public:
 
     bool declaresUse(const std::string& name, const std::string& intent) const;
     bool declaresProvide(const std::string& name, const std::string& intent) const;
+    // Changes whenever what was read for the package does, across rebuilds;
+    // 0 for an unknown name.
+    std::uint64_t revisionOf(const std::string& name) const;
 
     // ── Links clicked outside the shell ─────────────────────────────────
     // The link requester's `uses` is derived: the shell's web intents plus every
@@ -151,6 +155,14 @@ private:
     std::set<std::string> m_webReachable;                          // "name/intent"
     std::map<std::string, int> m_webIntents;                       // intent -> web-reachable entries
     std::vector<std::string> m_diagnostics;
+
+    struct Seen {
+        std::string fingerprint;   // metadata and labels as last read
+        std::uint64_t revision = 0;
+    };
+    std::map<std::string, Seen> m_seen;   // survives rebuild(); installed packages only
+    std::uint64_t m_lastRevision = 0;
+    std::uint64_t m_shellRevision = 0;
 
     // Declared in code; survive rebuild().
     std::string m_shellName;

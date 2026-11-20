@@ -124,7 +124,8 @@ fires, and answers items with `answer(secret, id, {...})`:
 | `present` {app}, `offer_install` {intent, candidates}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
 
 An item that ends before the presenter pulled it is withdrawn from the queue;
-`dismiss` is only for items the presenter already has. Install offers come only
+`dismiss` is only for items the presenter already has. A pick of a provider that
+changed while the chooser was open is taken, and a new `choose` follows. Install offers come only
 for clicked or opened requests, once per intent a minute.
 
 Package and module names in work items are plain (`[A-Za-z0-9_.-]`, the

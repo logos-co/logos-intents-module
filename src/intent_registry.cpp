@@ -156,6 +156,7 @@ void IntentRegistry::declareShell(const std::string& shellName,
         else diagnose("shell: handoff for '" + forLog(intent) + "', which the shell doesn't provide — ignored");
     }
     m_shellEntry = {shellName, displayName.empty() ? shellName : displayName, iconSource};
+    ++m_shellRevision;
     installShell();
 
     // The namespace is reserved for packages already read too.
@@ -206,6 +207,9 @@ void IntentRegistry::rebuild(const std::vector<LoadedPackage>& packages)
         }
         ingest(p.name, p.metadata, p.displayName, p.iconSource);
     }
+    // Only what is installed: a package back after an uninstall is a new one.
+    for (auto it = m_seen.begin(); it != m_seen.end();)
+        it = m_types.count(it->first) ? std::next(it) : m_seen.erase(it);
 }
 
 std::vector<std::string> IntentRegistry::parseUses(const json* raw, const std::string& name)
@@ -333,6 +337,11 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
     std::vector<Provide> provides = parseProvides(findKey(metadata, "provides"), name);
     const std::vector<std::string> uses = parseUses(findKey(metadata, "uses"), name);
 
+    const std::string fingerprint = metadata.dump(-1, ' ', false, json::error_handler_t::replace)
+        + '\x1f' + displayName + '\x1f' + iconSource;
+    Seen& seen = m_seen[name];
+    if (seen.revision == 0 || seen.fingerprint != fingerprint) seen = Seen{fingerprint, ++m_lastRevision};
+
     m_types[name] = type;
     m_entries[name] = {name, displayName.empty() ? name : displayName, iconSource};
     for (Provide& p : provides) {
@@ -434,6 +443,13 @@ bool IntentRegistry::declaresUse(const std::string& name, const std::string& int
             || m_installableWebIntents.count(intent);
     const auto it = m_uses.find(name);
     return it != m_uses.end() && it->second.count(intent);
+}
+
+std::uint64_t IntentRegistry::revisionOf(const std::string& name) const
+{
+    if (isShell(name)) return m_shellRevision;
+    const auto it = m_seen.find(name);
+    return it == m_seen.end() || !m_types.count(name) ? 0 : it->second.revision;
 }
 
 bool IntentRegistry::declaresProvide(const std::string& name, const std::string& intent) const

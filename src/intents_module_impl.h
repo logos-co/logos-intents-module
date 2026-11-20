@@ -55,7 +55,7 @@ public:
 
     std::string register_click_token(const std::string& secret, const std::string& token, const std::string& app, const std::string& intent);
 
-    std::string backend_registered(const std::string& secret, const std::string& app, const std::string& module);
+    std::string backend_registered(const std::string& secret, const std::string& app, const std::string& module, const std::string& instance);
 
     std::string backend_unregistered(const std::string& secret, const std::string& app);
 

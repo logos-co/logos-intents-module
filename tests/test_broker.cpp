@@ -356,6 +356,30 @@ LOGOS_TEST(a_reloaded_backend_cannot_answer_its_predecessors_request)
     LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
 }
 
+// The same run of a backend registered again (a second view of the app)
+// changes nothing; another run starts afresh.
+LOGOS_TEST(registering_the_same_run_of_a_backend_again_changes_nothing)
+{
+    World w;
+    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run1");
+    const auto t = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run1"));
+    LOGOS_ASSERT_TRUE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json("signed"), "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(t), std::string());
+
+    const auto u = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    const auto e = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run2"));
+    LOGOS_ASSERT_FALSE(w.broker.respond("signer_ui_backend", e.dispatchId, true, json(), "", w.now));
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(u), err::unavailable);
+}
+
 LOGOS_TEST(unregistering_a_backend_fails_what_it_was_given)
 {
     World w;

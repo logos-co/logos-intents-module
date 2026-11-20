@@ -410,3 +410,31 @@ LOGOS_TEST(an_unreachable_provider_settles_unavailable_after_the_floor)
     LOGOS_ASSERT_EQ(h.call(h.service->result(r["handle"], r["receipt"]))["result"]["error"].get<std::string>(),
                     err::unavailable);
 }
+
+// A backend registered again by the same run keeps what it asked for.
+LOGOS_TEST(the_same_run_of_a_backend_registered_again_keeps_its_requests)
+{
+    Harness h("immediate");
+    const auto registerRun = [&](const std::string& run) {
+        const CallCaller host = CallCaller::host();
+        return h.call(h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", run))["ok"].get<bool>();
+    };
+    LOGOS_ASSERT_TRUE(registerRun("run1"));
+    json t;
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        t = h.call(h.service->request("signing.approve", "{}", ""));
+    }
+    LOGOS_ASSERT_TRUE(registerRun("run1"));
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        const json r = h.call(h.service->result(t["handle"].get<std::string>(), t["receipt"].get<std::string>()));
+        LOGOS_ASSERT_EQ(r.value("state", std::string()), std::string("pending"));
+    }
+    LOGOS_ASSERT_TRUE(registerRun("run2"));
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        const json r = h.call(h.service->result(t["handle"].get<std::string>(), t["receipt"].get<std::string>()));
+        LOGOS_ASSERT_EQ(r.value("error", std::string()), std::string("unknown_handle"));
+    }
+}

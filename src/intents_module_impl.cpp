@@ -179,9 +179,10 @@ std::string IntentsModuleImpl::register_click_token(const std::string& secret, c
 }
 
 std::string IntentsModuleImpl::backend_registered(const std::string& secret, const std::string& app,
-                                                  const std::string& module)
+                                                  const std::string& module, const std::string& instance)
 {
-    return guarded("backendRegistered", [&] { return m_state->service->backendRegistered(secret, app, module); });
+    return guarded("backendRegistered",
+                   [&] { return m_state->service->backendRegistered(secret, app, module, instance); });
 }
 
 std::string IntentsModuleImpl::backend_unregistered(const std::string& secret, const std::string& app)

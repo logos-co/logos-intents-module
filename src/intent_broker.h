@@ -92,7 +92,10 @@ public:
     // ── App backends, as the presenter registered them ─────────────────
     // Refused when the app isn't an installed ui_qml package, when `module` is
     // an installed package's name, or when it already serves another app.
-    bool registerBackend(const std::string& app, const std::string& module, std::int64_t now);
+    // `instance` names the backend's run: the same one again changes nothing;
+    // another, or none, is a new backend.
+    bool registerBackend(const std::string& app, const std::string& module, std::int64_t now,
+                         const std::string& instance = {});
     void unregisterBackend(const std::string& app, std::int64_t now);
     // After the installed set or the shell changes: drops every registration
     // registerBackend() would now refuse.
@@ -193,6 +196,7 @@ private:
     struct Backend {
         std::string module;
         std::uint64_t generation = 0;
+        std::string instance;
     };
 
     struct Bucket {

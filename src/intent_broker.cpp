@@ -166,7 +166,7 @@ std::string IntentBroker::backendRefusal(const std::string& app, const std::stri
 }
 
 bool IntentBroker::registerBackend(const std::string& app, const std::string& module,
-                                   std::int64_t now)
+                                   std::int64_t now, const std::string& instance)
 {
     if (app.empty() || !isValidPackageName(module)) return false;
     if (const std::string why = backendRefusal(app, module); !why.empty()) {
@@ -179,9 +179,13 @@ bool IntentBroker::registerBackend(const std::string& app, const std::string& mo
             return false;
         }
     }
-    // A new instance is a new backend: what was dispatched to the old one fails.
-    if (m_backends.count(app)) unregisterBackend(app, now);
-    m_backends[app] = Backend{module, ++m_backendGeneration};
+    if (const auto known = m_backends.find(app); known != m_backends.end()) {
+        if (!instance.empty() && known->second.module == module && known->second.instance == instance)
+            return true;
+        // A new instance is a new backend: what was dispatched to the old one fails.
+        unregisterBackend(app, now);
+    }
+    m_backends[app] = Backend{module, ++m_backendGeneration, instance};
     drainActivation(app, /*ready=*/true, now);
     return true;
 }

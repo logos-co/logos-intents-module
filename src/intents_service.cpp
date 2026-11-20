@@ -314,14 +314,14 @@ std::string IntentsService::registerClickToken(const std::string& secret, const 
 }
 
 std::string IntentsService::backendRegistered(const std::string& secret, const std::string& app,
-                                              const std::string& module)
+                                              const std::string& module, const std::string& instance)
 {
     std::vector<Effect> effects;
     bool ok = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!presenterCall(secret, "backend_registered")) return refusal("refused");
-        ok = m_broker.registerBackend(app, module, m_clock());
+        ok = m_broker.registerBackend(app, module, m_clock(), instance);
         if (ok) m_clickTokens.erase(app);
         effects = m_broker.takeEffects();
     }

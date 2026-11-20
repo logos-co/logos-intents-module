@@ -103,8 +103,13 @@ installed packages:
 
 ```
 claim({"attention": "interactive" | "immediate" | "headless"}) -> { ok, secret }
-declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module) ...
+declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module, instance) ...
 ```
+
+`instance` names one run of the backend. Registering the same app, module and
+instance again changes nothing; another instance, or an empty one, is a new
+backend, and whatever was dispatched to the one before fails. The host
+unregisters a backend when that run stops.
 
 - `interactive` (Basecamp): a request pops up only with a click token behind it;
   otherwise it waits in the pending list.

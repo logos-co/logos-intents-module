@@ -67,7 +67,9 @@ it: nothing about what is installed is decided before then.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
 values); 16 requests open and 4 in the pending list at a time; results are kept
-for 10 minutes, or until `cancel(handle, receipt)`, within 4 MiB.
+for 10 minutes, or until `cancel(handle, receipt)`, within 4 MiB. Cancelling
+withdraws a request; it doesn't stop a provider that already took it (see
+Providing).
 
 **Restarts.** If `intents_module` restarts, its requests are gone: `result()`
 answers `unknown_handle`. Watch your subscription's status (`LpClient`'s
@@ -82,6 +84,12 @@ when `logos::currentCaller().isModule("intents_module")`, and return
 `{"ok":true}` at once — within 5 seconds, or the provider counts as unreachable.
 Then answer with `respond(dispatch, ok, data_json, error)`, data of at most
 1 MiB. If a person has to see something, show it through your own view.
+
+**Cancelling.** A requester's `cancel` withdraws the request and drops its
+result. The provider isn't told, and a later `respond` from it is dropped.
+Nothing it already started (a transfer, a signature) is stopped or undone, so
+a provider that acts on a delivery should have the person confirm in its own
+view first. There is no cancellation protocol for providers yet.
 
 An app's provider is its backend: the presenter tells `intents_module` which
 backend it registered for which app, and only that backend may respond. With

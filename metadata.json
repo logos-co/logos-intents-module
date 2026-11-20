@@ -1,0 +1,27 @@
+{
+  "name": "intents_module",
+  "display_name": "Intents",
+  "version": "0.1.0",
+  "description": "Routes user-mediated requests between modules: who provides what, getting a person's attention, and results for the requester alone",
+  "author": "Logos Core Team",
+  "type": "core",
+  "category": "platform",
+  "main": "intents_module_plugin",
+  "dependencies": [],
+  "nix": {
+    "packages": {
+      "build": ["boost"],
+      "runtime": ["boost"]
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": ["Boost"],
+      "extra_sources": []
+    }
+  },
+  "interface": "universal",
+  "codegen": {
+    "impl_class": "IntentsModuleImpl",
+    "impl_header": "src/intents_module_impl.h"
+  }
+}

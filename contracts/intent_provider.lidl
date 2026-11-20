@@ -1,0 +1,7 @@
+module intent_provider {
+  version "1.0.0"
+  description "Implemented by a module that provides intents. intents_module calls deliver; the provider answers later with intents_module.respond(dispatch, ...)."
+  depends []
+
+  method deliver(dispatch: tstr, intent: tstr, params_json: tstr, requester: tstr) -> tstr
+}

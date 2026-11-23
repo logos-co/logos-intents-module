@@ -901,3 +901,157 @@ LOGOS_TEST(requests_beyond_the_rate_wait_for_tokens)
     LOGOS_ASSERT_TRUE(w.broker.admit("wallet_module", w.now));
     LOGOS_ASSERT_FALSE(w.broker.admit("wallet_module", w.now));
 }
+
+// Every declared type is held, not only strings.
+LOGOS_TEST(an_answer_is_checked_against_every_declared_type)
+{
+    World w(Attention::Headless);
+    const auto field = [](const char* name, const char* type, bool required) {
+        return json{{"name", name}, {"type", type}, {"required", required}};
+    };
+    w.registry.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
+        {"intent", "stamp.make"},
+        {"result", json::array({field("count", "number", true), field("final", "bool", true),
+                                field("meta", "object", true), field("parts", "array", true),
+                                field("note", "string", false), field("at", "timestamp", true)})},
+    }})), "", "");
+    w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
+    w.broker.configureProvider("stamp.make", "stamp_module");
+    const auto answered = [&](const json& data) {
+        const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+        const auto d = ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId;
+        w.broker.respond("stamp_module", d, true, data, "", w.now);
+        return w.settledError(t, "asker_module");
+    };
+
+    // An optional field may be left out; a type this module doesn't know passes.
+    const json good{{"count", 1.5}, {"final", false}, {"meta", json::object()},
+                    {"parts", json::array()}, {"at", "2026-11-23"}};
+    LOGOS_ASSERT_EQ(answered(good), std::string());
+
+    for (const char* name : {"count", "final", "meta", "parts", "note"}) {
+        json bad = good;
+        bad[name] = name == std::string("note") ? json(5) : json("x");
+        LOGOS_ASSERT_EQ(answered(bad), err::failed);
+    }
+}
+
+LOGOS_TEST(params_of_the_wrong_declared_type_are_bad_requests)
+{
+    World w(Attention::Headless);
+    w.registry.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
+        {"intent", "stamp.make"},
+        {"params", json::array({json{{"name", "count"}, {"type", "number"}, {"required", true}},
+                                json{{"name", "note"}, {"type", "string"}, {"required", false}}})},
+    }})), "", "");
+    w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
+    w.broker.configureProvider("stamp.make", "stamp_module");
+    const auto ask = [&](const json& params) {
+        return w.broker.submit("asker_module", "stamp.make", params, false, false, w.now);
+    };
+
+    const auto wrongType = ask(json{{"count", "3"}});
+    const auto wrongOptional = ask(json{{"count", 3}, {"note", 1}});
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(wrongType, "asker_module"), err::badRequest);
+    LOGOS_ASSERT_EQ(w.settledError(wrongOptional, "asker_module"), err::badRequest);
+
+    w.broker.takeEffects();
+    ask(json{{"count", 3}});   // the optional one left out
+    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
+}
+
+LOGOS_TEST(clearing_the_headless_provider_stops_deliveries)
+{
+    World w(Attention::Headless, /*twoProviders=*/true);
+    w.broker.configureProvider("signing.approve", "cli_signer");
+    w.broker.configureProvider("signing.approve", "");
+    const auto t = w.ask();
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+namespace {
+
+// A request waiting on signer_ui to come up, and the activate item for it.
+json activating(World& w, IntentBroker::Ticket* ticket)
+{
+    *ticket = w.ask();
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    return workOfKind(w.broker.takeWork(), "activate").at(0);
+}
+
+} // namespace
+
+// "activated" isn't enough: only a registered backend can be delivered to.
+LOGOS_TEST(an_activated_app_is_delivered_to_once_its_backend_registers)
+{
+    World w;
+    IntentBroker::Ticket t;
+    const std::string id = activating(w, &t)["id"].get<std::string>();
+    LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "open"}}, w.now));
+
+    LOGOS_ASSERT_TRUE(w.broker.answer(id, json{{"action", "activated"}}, w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
+
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
+    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
+}
+
+LOGOS_TEST(an_app_that_fails_to_come_up_is_unavailable)
+{
+    World w;
+    IntentBroker::Ticket t;
+    const std::string id = activating(w, &t)["id"].get<std::string>();
+    LOGOS_ASSERT_TRUE(w.broker.answer(id, json{{"action", "failed"}}, w.now));
+    LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "failed"}}, w.now));   // answered once
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+
+    // A backend that turns up afterwards gets nothing.
+    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+}
+
+LOGOS_TEST(an_app_that_never_comes_up_is_unavailable)
+{
+    World w;
+    IntentBroker::Ticket t;
+    activating(w, &t);
+    w.advance(45000);
+    LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
+    w.advance(1);
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+// The backstop only catches a chooser that went away.
+LOGOS_TEST(a_chooser_left_open_past_the_backstop_is_cancelled)
+{
+    World w(Attention::Immediate, /*twoProviders=*/true);
+    const auto t = w.ask();
+    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    w.advance(10 * 60 * 1000 + 1);
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::cancelled);
+    LOGOS_ASSERT_FALSE(w.broker.answer(shown[0]["id"].get<std::string>(),
+                                       json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
+}
+
+LOGOS_TEST(a_queued_chooser_with_no_provider_left_is_unavailable)
+{
+    World w(Attention::Immediate, /*twoProviders=*/true);
+    w.ask();
+    w.now += 1;
+    const auto second = w.ask();
+    const auto first = workOfKind(w.broker.takeWork(), "choose");
+    reinstall(w, {walletPackage()});   // every provider uninstalled
+
+    w.broker.answer(first[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now);
+    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "choose").empty());
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(second), err::unavailable);
+}

@@ -106,8 +106,9 @@ view first. There is no cancellation protocol for providers yet.
 
 An app asks and answers through its backend module, which declares the app's
 `uses` and `provides` in its own `metadata.json`. With logos-module-builder, an
-app with a `"backend": "module"` backend gets them copied there, and its
-backend gets `deliver`: implement
+app with a `"backend": "module"` backend gets them copied there (shipped in the
+app's package as `<app>_backend/metadata.json`), and its backend gets
+`deliver`: implement
 `QString deliver(const QString& dispatch, const QString& intent, const QString& paramsJson, const QString& requester)`
 in the backend class; the generated glue already refuses anyone but
 `intents_module`.

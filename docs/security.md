@@ -64,15 +64,15 @@ of name. Neither is a `logosctl` user before the host has claimed.
   the name must not be installable in the first place (7).
 - **Tell the module about every change.** Call `set_installed` after each
   install or uninstall, before the new package loads, with every app's backend
-  as the module it is.
+  as the module it is, from the `metadata.json` its app ships for it, whether
+  or not it has run yet.
 - **Reserve backend names.** Installers refuse packages named like an app's
   backend (`<app>_backend`), not only bundled ones; otherwise a package
   installed first takes the name the app's backend asks and answers under.
 - **Restrict the shell's confirm intents.** Any package that declares a shell
   intent may ask for it. List every `confirm_*` intent under `restricted`,
-  naming the Package Manager's backend module (`package_manager_ui_backend`)
-  (Basecamp's declaration leaves out `basecamp.packages.confirm_install`), in
-  every declaration: each one replaces the last whole.
+  naming the Package Manager's backend module (`package_manager_ui_backend`),
+  in every declaration: each one replaces the last whole.
 - **Decide when to interrupt.** Open a pending request at once only on a real
   click in the requesting module's own screen, the one the host loaded it for,
   once per click and within about 2 s; leave the rest in the pending list.

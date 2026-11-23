@@ -185,20 +185,9 @@ std::string IntentsModuleImpl::set_installed(const std::string& secret, const st
     return guarded("setInstalled", [&] { return m_state->service->setInstalled(secret, packages_json); });
 }
 
-std::string IntentsModuleImpl::set_installable(const std::string& secret, const std::string& catalog_json)
-{
-    return guarded("setInstallable", [&] { return m_state->service->setInstallable(secret, catalog_json); });
-}
-
 std::string IntentsModuleImpl::declare_shell(const std::string& secret, const std::string& shell_json)
 {
     return guarded("declareShell", [&] { return m_state->service->declareShell(secret, shell_json); });
-}
-
-std::string IntentsModuleImpl::configure_provider(const std::string& secret, const std::string& intent,
-                                                  const std::string& provider)
-{
-    return guarded("configureProvider", [&] { return m_state->service->configureProvider(secret, intent, provider); });
 }
 
 std::string IntentsModuleImpl::shell_request(const std::string& secret, const std::string& intent,

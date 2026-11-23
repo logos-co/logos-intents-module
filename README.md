@@ -125,7 +125,7 @@ and before the daemon accepts `logosctl` calls, then declares itself and the
 installed packages:
 
 ```
-claim({"attention": "interactive" | "immediate" | "headless"}) -> { ok, secret }
+claim({"attention": "interactive" | "immediate"}) -> { ok, secret }
 declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module, instance) ...
 ```
 
@@ -134,8 +134,8 @@ declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(s
   view shows that list; until then Basecamp claims `immediate`.
 - `immediate` (a terminal presenter, and Basecamp for now): everything is shown
   at once.
-- `headless` (a daemon with no one to ask): only providers named with
-  `configure_provider` are used, without asking.
+
+Until a presenter claims, nobody can be asked: every request is `unavailable`.
 
 `instance` names one run of the backend. Registering the same app, module and
 instance again changes nothing; another instance, or an empty one, is a new
@@ -151,12 +151,13 @@ fires, and answers items with `answer(secret, id, {...})`:
 | `activate` {app} | `{"action":"activated"}` (then `backend_registered`) or `{"action":"failed"}` |
 | `pending` {dispatch, intent, requester} | `{"action":"open"}` (that is the click) or `{"action":"dismiss"}` |
 | `deliver` {dispatch, intent, params, requester} — the shell is the provider | `{"action":"respond","ok":b,"data":d,"error":e}` |
-| `present` {app}, `offer_install` {intent, candidates}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
+| `present` {app}, `offer_install` {intent}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
 
 An item that ends before the presenter pulled it is withdrawn from the queue;
 `dismiss` is only for items the presenter already has. A pick of a provider that
 changed while the chooser was open is taken, and a new `choose` follows. Install offers come only
-for clicked or opened requests, once per intent a minute.
+for clicked or opened requests, once per intent a minute; the presenter finds
+what could be installed in its own catalogue.
 
 Package and module names in work items are plain (`[A-Za-z0-9_.-]`, the
 registry refuses anything else), and requester and display names are stripped of

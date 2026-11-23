@@ -177,7 +177,6 @@ void IntentRegistry::declareShell(const std::string& shellName,
             it = intentSet.erase(it);
         }
     }
-    recomputeInstallable();
 }
 
 void IntentRegistry::resetPackages()
@@ -213,7 +212,6 @@ void IntentRegistry::rebuild(const std::vector<LoadedPackage>& packages)
     // Only what is installed: a package back after an uninstall is a new one.
     for (auto it = m_seen.begin(); it != m_seen.end();)
         it = m_types.count(it->first) ? std::next(it) : m_seen.erase(it);
-    recomputeInstallable();
 }
 
 std::vector<std::string> IntentRegistry::parseUses(const json* raw, const std::string& name)
@@ -457,10 +455,9 @@ bool IntentRegistry::isShell(const std::string& name) const
 
 bool IntentRegistry::declaresUse(const std::string& name, const std::string& intent) const
 {
-    // Derived on demand: the shell's web intents, and every opt-in, installed or offered.
+    // Derived on demand: the shell's web intents, and every installed opt-in.
     if (isLinkRequester(name))
-        return m_shellWebIntents.count(intent) || m_webIntents.count(intent)
-            || m_installableWebIntents.count(intent);
+        return m_shellWebIntents.count(intent) || m_webIntents.count(intent);
     const auto it = m_uses.find(name);
     return it != m_uses.end() && it->second.count(intent);
 }
@@ -507,59 +504,6 @@ bool IntentRegistry::isWebReachable(const std::string& provider, const std::stri
     // Per provider: one app's opt-in must not publish another's implementation.
     if (isShell(provider)) return m_shellWebIntents.count(intent) > 0;
     return m_webReachable.count(key(provider, intent)) > 0;
-}
-
-bool IntentRegistry::setInstallable(const std::map<std::string, std::vector<std::string>>& byName,
-                                    const std::map<std::string, std::vector<std::string>>& webByName)
-{
-    if (m_installableInput && m_installableInput->first == byName
-        && m_installableInput->second == webByName)
-        return false;
-    m_installableInput.emplace(byName, webByName);
-    recomputeInstallable();
-    return true;
-}
-
-// Derived from the catalogue and from what is installed, so redone when either changes.
-void IntentRegistry::recomputeInstallable()
-{
-    m_installable.clear();
-    m_installableWeb.clear();
-    m_installableWebIntents.clear();
-    if (!m_installableInput) return;
-    const auto& [byName, webByName] = *m_installableInput;
-    for (const auto& [name, intentList] : byName) {
-        // Installed packages are answered by the real table.
-        if (!isValidPackageName(name) || m_types.count(name)) continue;
-        const auto web = webByName.find(name);
-        std::size_t n = 0;
-        for (const std::string& intent : intentList) {
-            if (++n > kMaxEntries) break;
-            // A catalogue is less trusted than the disk, so no laxer filter.
-            if (!isValidName(intent) || isReservedNamespace(intent)) continue;
-            std::vector<std::string>& names = m_installable[intent];
-            if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
-            if (web != webByName.end()
-                && std::find(web->second.begin(), web->second.end(), intent) != web->second.end()) {
-                m_installableWeb.insert(key(name, intent));
-                m_installableWebIntents.insert(intent);
-            }
-        }
-    }
-    for (auto& [intent, names] : m_installable) std::sort(names.begin(), names.end());
-}
-
-std::vector<std::string> IntentRegistry::installableFor(const std::string& requester,
-                                                        const std::string& intent) const
-{
-    const auto it = m_installable.find(intent);
-    if (it == m_installable.end()) return {};
-    std::vector<std::string> names = it->second;
-    if (!isLinkRequester(requester)) return names;
-    names.erase(std::remove_if(names.begin(), names.end(),
-                               [&](const std::string& n) { return !m_installableWeb.count(key(n, intent)); }),
-                names.end());
-    return names;
 }
 
 } // namespace intents

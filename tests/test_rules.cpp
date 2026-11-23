@@ -124,7 +124,7 @@ LOGOS_TEST(package_names_are_plain)
 
 LOGOS_TEST(log_fields_stay_on_one_line)
 {
-    const std::string forged = "x\n[intents_module] presenter claimed (headless)";
+    const std::string forged = "x\n[intents_module] presenter claimed (immediate)";
     const std::string field = forLog(forged);
     LOGOS_ASSERT_TRUE(field.find('\n') == std::string::npos);
     LOGOS_ASSERT_TRUE(field.find("\\x0A") != std::string::npos);

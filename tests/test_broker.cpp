@@ -62,6 +62,21 @@ struct World {
     }
 };
 
+// The person picks `provider` in the chooser on screen.
+void choose(World& w, const std::string& provider)
+{
+    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    w.broker.answer(shown.at(0)["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", provider}}, w.now);
+}
+
+// ... and the delivery that follows.
+Effect pick(World& w, const std::string& provider)
+{
+    choose(w, provider);
+    return ofKind(w.broker.takeEffects(), K::Deliver).at(0);
+}
+
 } // namespace
 
 LOGOS_TEST(an_undeclared_intent_settles_not_declared_at_once)
@@ -83,34 +98,15 @@ LOGOS_TEST(nothing_provides_it_is_unavailable_but_only_after_the_floor)
     LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
 }
 
-LOGOS_TEST(headless_uses_only_a_configured_provider)
+// Until a presenter claims, nobody can be asked: nothing is shown or delivered.
+LOGOS_TEST(nothing_is_delivered_before_a_presenter_claims)
 {
-    World w(Attention::Headless);
-    const auto refused = w.ask();
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(refused), err::unavailable);
-
-    // An app needs a person to raise it; headless can't.
-    w.broker.configureProvider("signing.approve", "signer_ui");
-    const auto stillRefused = w.ask();
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(stillRefused), err::unavailable);
-    LOGOS_ASSERT_TRUE(w.broker.takeWork().empty());
-}
-
-LOGOS_TEST(headless_delivers_to_a_configured_core_module)
-{
-    World w(Attention::Headless, /*twoProviders=*/true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Unclaimed, /*twoProviders=*/true);
     const auto t = w.ask();
-    const auto delivers = ofKind(w.broker.takeEffects(), K::Deliver);
-    LOGOS_ASSERT_EQ(delivers.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(delivers[0].module, std::string("cli_signer"));
-    LOGOS_ASSERT_EQ(delivers[0].requester, std::string("wallet_module"));
-
-    LOGOS_ASSERT_TRUE(w.broker.respond("cli_signer", delivers[0].dispatchId, true, json{{"sig", "ab"}}, "", w.now));
-    const json r = w.broker.result("wallet_module", t.handle, t.receipt);
-    LOGOS_ASSERT_EQ(r["result"]["data"]["sig"].get<std::string>(), std::string("ab"));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    LOGOS_ASSERT_TRUE(w.broker.takeWork().empty());
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
 }
 
 LOGOS_TEST(one_provider_still_asks_the_person)
@@ -331,10 +327,9 @@ LOGOS_TEST(a_backend_that_comes_up_first_leaves_no_activation_behind)
 
 LOGOS_TEST(only_the_module_delivered_to_may_respond)
 {
-    World w(Attention::Headless, true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Immediate, true);
     const auto t = w.ask();
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto d = pick(w, "cli_signer");
     LOGOS_ASSERT_FALSE(w.broker.respond("wallet_module", d.dispatchId, true, json("forged"), "", w.now));
     LOGOS_ASSERT_FALSE(w.broker.respond("cli_signer", "not-a-dispatch", true, json(), "", w.now));
     LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
@@ -476,17 +471,16 @@ LOGOS_TEST(params_that_are_not_plain_data_or_miss_the_spec_are_bad_requests)
 // requester gets `failed` rather than data it can't read.
 LOGOS_TEST(an_answer_that_misses_its_declared_result_is_failed)
 {
-    World w(Attention::Headless);
+    World w;
     w.registry.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
         {"intent", "stamp.make"},
         {"result", json::array({json{{"name", "stamp"}, {"type", "string"}, {"required", true}}})},
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
-    w.broker.configureProvider("stamp.make", "stamp_module");
     const auto ask = [&]() {
         return w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
     };
-    const auto delivered = [&]() { return ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId; };
+    const auto delivered = [&]() { return pick(w, "stamp_module").dispatchId; };
 
     const auto missing = ask();
     LOGOS_ASSERT_FALSE(w.broker.respond("stamp_module", delivered(), true, json::object(), "", w.now));
@@ -513,25 +507,23 @@ LOGOS_TEST(an_answer_that_misses_its_declared_result_is_failed)
 
 LOGOS_TEST(a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload)
 {
-    World w(Attention::Headless, true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Immediate, true);
     const auto a = w.ask();
-    const auto da = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto da = pick(w, "cli_signer");
     w.broker.respond("cli_signer", da.dispatchId, false, json(), "unavailable", w.now);
     LOGOS_ASSERT_EQ(w.settledError(a), err::failed);
 
     const auto b = w.ask();
-    const auto db = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto db = pick(w, "cli_signer");
     LOGOS_ASSERT_FALSE(w.broker.respond("cli_signer", db.dispatchId, true, json::binary({1}), "", w.now));
     LOGOS_ASSERT_EQ(w.settledError(b), err::failed);
 }
 
 LOGOS_TEST(the_result_is_for_the_requester_holding_the_receipt)
 {
-    World w(Attention::Headless, true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Immediate, true);
     const auto t = w.ask();
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto d = pick(w, "cli_signer");
     w.broker.respond("cli_signer", d.dispatchId, true, json("secret-signature"), "", w.now);
 
     LOGOS_ASSERT_EQ(w.broker.result("other_module", t.handle, t.receipt)["error"].get<std::string>(),
@@ -546,7 +538,7 @@ LOGOS_TEST(the_result_is_for_the_requester_holding_the_receipt)
     LOGOS_ASSERT_TRUE(w.broker.cancel("wallet_module", t.handle, t.receipt, w.now));
     LOGOS_ASSERT_FALSE(w.broker.result("wallet_module", t.handle, t.receipt)["ok"].get<bool>());
     const auto u = w.ask();
-    const auto du = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto du = pick(w, "cli_signer");
     w.broker.respond("cli_signer", du.dispatchId, true, json(1), "", w.now);
     w.advance(10 * 60 * 1000 + 1);
     LOGOS_ASSERT_FALSE(w.broker.result("wallet_module", u.handle, u.receipt)["ok"].get<bool>());
@@ -554,10 +546,9 @@ LOGOS_TEST(the_result_is_for_the_requester_holding_the_receipt)
 
 LOGOS_TEST(a_provider_that_never_takes_the_delivery_times_out)
 {
-    World w(Attention::Headless, true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Immediate, true);
     const auto t = w.ask();
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto d = pick(w, "cli_signer");
     w.broker.deliveryOutcome(d.dispatchId, /*reached=*/true, /*accepted=*/false, w.now);
     w.advance(20001);
     LOGOS_ASSERT_EQ(w.settledError(t), err::timeout);
@@ -565,10 +556,9 @@ LOGOS_TEST(a_provider_that_never_takes_the_delivery_times_out)
 
 LOGOS_TEST(an_unreachable_provider_is_unavailable)
 {
-    World w(Attention::Headless, true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
+    World w(Attention::Immediate, true);
     const auto t = w.ask();
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
+    const auto d = pick(w, "cli_signer");
     w.broker.deliveryOutcome(d.dispatchId, /*reached=*/false, false, w.now);
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
@@ -669,7 +659,6 @@ LOGOS_TEST(unclicked_requests_wait_alike_whatever_is_installed)
 LOGOS_TEST(an_install_offer_needs_a_click_and_comes_once_a_minute)
 {
     World w(Attention::Interactive);
-    w.registry.setInstallable({{"sharer_ui", {"nobody.provides"}}});
     for (int i = 0; i < 3; ++i) w.ask("wallet_module", "nobody.provides", json::object());
     json work = w.broker.takeWork();
     LOGOS_ASSERT_TRUE(workOfKind(work, "offer_install").empty());
@@ -706,18 +695,15 @@ LOGOS_TEST(a_flood_of_notices_cannot_push_out_a_chooser)
 {
     World w(Attention::Immediate);
     const auto victim = w.ask();
-    std::map<std::string, std::vector<std::string>> installable;
     for (int m = 0; m < 17; ++m) {
         const std::string requester = "spam" + std::to_string(m);
         json uses = json::array();
         for (int i = 0; i < 64; ++i) {
             const std::string intent = "flood.k" + std::to_string(m * 64 + i);
             uses.push_back(json{{"intent", intent}});
-            installable["store" + std::to_string(m)].push_back(intent);
         }
         w.registry.ingest(requester, pkg(requester, "core", json::array(), uses), "", "");
     }
-    w.registry.setInstallable(installable);
     for (int m = 0; m < 17; ++m) {
         for (int i = 0; i < 64; ++i) {
             w.ask("spam" + std::to_string(m), "flood.k" + std::to_string(m * 64 + i), json::object());
@@ -905,7 +891,7 @@ LOGOS_TEST(requests_beyond_the_rate_wait_for_tokens)
 // Every declared type is held, not only strings.
 LOGOS_TEST(an_answer_is_checked_against_every_declared_type)
 {
-    World w(Attention::Headless);
+    World w;
     const auto field = [](const char* name, const char* type, bool required) {
         return json{{"name", name}, {"type", type}, {"required", required}};
     };
@@ -916,10 +902,9 @@ LOGOS_TEST(an_answer_is_checked_against_every_declared_type)
                                 field("note", "string", false), field("at", "timestamp", true)})},
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
-    w.broker.configureProvider("stamp.make", "stamp_module");
     const auto answered = [&](const json& data) {
         const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
-        const auto d = ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId;
+        const auto d = pick(w, "stamp_module").dispatchId;
         w.broker.respond("stamp_module", d, true, data, "", w.now);
         return w.settledError(t, "asker_module");
     };
@@ -938,38 +923,28 @@ LOGOS_TEST(an_answer_is_checked_against_every_declared_type)
 
 LOGOS_TEST(params_of_the_wrong_declared_type_are_bad_requests)
 {
-    World w(Attention::Headless);
+    World w;
     w.registry.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
         {"intent", "stamp.make"},
         {"params", json::array({json{{"name", "count"}, {"type", "number"}, {"required", true}},
                                 json{{"name", "note"}, {"type", "string"}, {"required", false}}})},
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
-    w.broker.configureProvider("stamp.make", "stamp_module");
     const auto ask = [&](const json& params) {
-        return w.broker.submit("asker_module", "stamp.make", params, false, false, w.now);
+        const auto t = w.broker.submit("asker_module", "stamp.make", params, false, false, w.now);
+        choose(w, "stamp_module");
+        return t;
     };
 
     const auto wrongType = ask(json{{"count", "3"}});
     const auto wrongOptional = ask(json{{"count", 3}, {"note", 1}});
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(wrongType, "asker_module"), err::badRequest);
     LOGOS_ASSERT_EQ(w.settledError(wrongOptional, "asker_module"), err::badRequest);
 
-    w.broker.takeEffects();
     ask(json{{"count", 3}});   // the optional one left out
     LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
-}
-
-LOGOS_TEST(clearing_the_headless_provider_stops_deliveries)
-{
-    World w(Attention::Headless, /*twoProviders=*/true);
-    w.broker.configureProvider("signing.approve", "cli_signer");
-    w.broker.configureProvider("signing.approve", "");
-    const auto t = w.ask();
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
 }
 
 namespace {
@@ -1098,7 +1073,7 @@ LOGOS_TEST(a_link_cannot_reach_an_app_that_dropped_web_while_coming_up)
 // request, not to metadata installed since.
 LOGOS_TEST(an_answer_is_checked_against_the_result_declared_at_delivery)
 {
-    World w(Attention::Headless);
+    World w;
     const auto stamp = [](const char* field) {
         return pkg("stamp_module", "core", json::array({json{
             {"intent", "stamp.make"},
@@ -1107,9 +1082,8 @@ LOGOS_TEST(an_answer_is_checked_against_the_result_declared_at_delivery)
     };
     const json asker = pkg("asker_module", "core", json::array(), intentList({"stamp.make"}));
     reinstall(w, {walletPackage(), asker, stamp("signature")});
-    w.broker.configureProvider("stamp.make", "stamp_module");
     const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId;
+    const auto d = pick(w, "stamp_module").dispatchId;
 
     reinstall(w, {walletPackage(), asker, stamp("approvalId")});
     LOGOS_ASSERT_TRUE(w.broker.respond("stamp_module", d, true, json{{"signature", "ab"}}, "", w.now));

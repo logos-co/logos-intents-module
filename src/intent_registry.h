@@ -10,10 +10,8 @@
 
 #include <cstdint>
 #include <map>
-#include <optional>
 #include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace intents {
@@ -123,13 +121,6 @@ public:
     bool isLinkRequester(const std::string& name) const;
     bool isWebReachable(const std::string& provider, const std::string& intent) const;
 
-    // ── Installable providers: a separate table resolve() never reads ───
-    // Returns false, changing nothing, when the input equals the last call's.
-    bool setInstallable(const std::map<std::string, std::vector<std::string>>& byName,
-                        const std::map<std::string, std::vector<std::string>>& webByName = {});
-    std::vector<std::string> installableFor(const std::string& requester,
-                                            const std::string& intent) const;
-
     // Everything skipped or refused, one line each, safe to log.
     const std::vector<std::string>& diagnostics() const { return m_diagnostics; }
 
@@ -144,7 +135,6 @@ private:
 
     bool isReservedNamespace(const std::string& intent) const;
     void resetPackages();
-    void recomputeInstallable();
     void installShell();
     void dropPackage(const std::string& name);
     void diagnose(const std::string& line);
@@ -180,12 +170,6 @@ private:
     std::map<std::string, std::vector<std::string>> m_restricted;
     std::string m_linkName;
     std::set<std::string> m_shellWebIntents;
-
-    std::map<std::string, std::vector<std::string>> m_installable;   // intent -> names
-    std::set<std::string> m_installableWeb;                          // "name/intent"
-    std::set<std::string> m_installableWebIntents;
-    std::optional<std::pair<std::map<std::string, std::vector<std::string>>,
-                            std::map<std::string, std::vector<std::string>>>> m_installableInput;
 };
 
 } // namespace intents

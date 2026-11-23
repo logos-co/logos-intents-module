@@ -122,39 +122,6 @@ LOGOS_TEST(a_link_reaches_only_providers_that_opted_in)
     LOGOS_ASSERT_EQ(r.resolveFor("other_ui", "share.text").found.size(), std::size_t(2));
 }
 
-LOGOS_TEST(installable_never_lists_installed_or_reserved)
-{
-    IntentRegistry r = withShell();
-    r.ingest("have_ui", pkg("have_ui", "ui_qml", intentList({"share.text"})), "", "");
-    LOGOS_ASSERT_TRUE(r.setInstallable({{"have_ui", {"share.text"}},
-                                        {"new_ui", {"share.text", "basecamp.apps.launch"}}}));
-    const auto names = r.installableFor("x_ui", "share.text");
-    LOGOS_ASSERT_EQ(names.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(names[0], std::string("new_ui"));
-    LOGOS_ASSERT_TRUE(r.installableFor("x_ui", "basecamp.apps.launch").empty());
-    LOGOS_ASSERT_FALSE(r.setInstallable({{"have_ui", {"share.text"}},
-                                         {"new_ui", {"share.text", "basecamp.apps.launch"}}}));
-}
-
-// The offers follow what is installed: a package installed since the catalogue
-// came is answered by the real table, and offered again once it is gone.
-LOGOS_TEST(install_offers_follow_what_is_installed)
-{
-    IntentRegistry r = withShell();
-    r.registerLinkRequester("basecamp_link", {});
-    r.setInstallable({{"sharer_ui", {"share.text"}}}, {{"sharer_ui", {"share.text"}}});
-    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(1));
-
-    const json sharer = pkg("sharer_ui", "ui_qml", intentList({"share.text"}));   // installed, no web
-    r.rebuild({LoadedPackage{"sharer_ui", "", "", sharer, ""}});
-    LOGOS_ASSERT_TRUE(r.installableFor("x_ui", "share.text").empty());
-    LOGOS_ASSERT_FALSE(r.declaresUse("basecamp_link", "share.text"));
-
-    r.rebuild({});
-    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(1));
-    LOGOS_ASSERT_TRUE(r.declaresUse("basecamp_link", "share.text"));
-}
-
 LOGOS_TEST(a_provides_entry_describes_its_result_like_its_params)
 {
     IntentRegistry r;
@@ -231,10 +198,6 @@ LOGOS_TEST(package_names_with_anything_but_plain_characters_are_skipped)
     r.ingest("evil\x1b[2J_ui", pkg("evil\x1b[2J_ui", "ui_qml", intentList({"share.text"})), "", "");
     r.ingest("ok_ui", pkg("ok_ui", "ui_qml", intentList({"share.text"})), "", "");
     LOGOS_ASSERT_EQ(r.resolve("share.text").found.size(), std::size_t(1));
-    LOGOS_ASSERT_TRUE(r.setInstallable({{"bad\x07name", {"share.other"}}, {"good_ui", {"share.other"}}}));
-    const auto names = r.installableFor("x", "share.other");
-    LOGOS_ASSERT_EQ(names.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(names[0], std::string("good_ui"));
     for (const std::string& d : r.diagnostics()) LOGOS_ASSERT_TRUE(d.find('\x1b') == std::string::npos);
 }
 
@@ -353,17 +316,4 @@ LOGOS_TEST(a_metadata_json_that_is_a_directory_is_refused)
     LOGOS_ASSERT_EQ(loaded.size(), std::size_t(1));
     LOGOS_ASSERT_TRUE(loaded[0].metadata.is_discarded());
     LOGOS_ASSERT_EQ(loaded[0].error, std::string("metadata.json is not a regular file"));
-}
-
-// A web page may be offered only what would be reachable from the web once installed.
-LOGOS_TEST(a_link_is_offered_only_web_reachable_installs)
-{
-    IntentRegistry r = withShell();
-    r.registerLinkRequester("basecamp_link", {});
-    r.setInstallable({{"local_ui", {"share.text"}}, {"web_ui", {"share.text"}}},
-                     {{"web_ui", {"share.text"}}});
-    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(2));
-    const auto forLink = r.installableFor("basecamp_link", "share.text");
-    LOGOS_ASSERT_EQ(forLink.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(forLink[0], std::string("web_ui"));
 }

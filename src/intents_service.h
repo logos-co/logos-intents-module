@@ -63,10 +63,7 @@ public:
                                   const std::string& module, const std::string& instance = {});
     std::string backendUnregistered(const std::string& secret, const std::string& app);
     std::string setInstalled(const std::string& secret, const std::string& packagesJson);
-    std::string setInstallable(const std::string& secret, const std::string& catalogJson);
     std::string declareShell(const std::string& secret, const std::string& shellJson);
-    std::string configureProvider(const std::string& secret, const std::string& intent,
-                                  const std::string& provider);
     std::string shellRequest(const std::string& secret, const std::string& intent,
                              const std::string& paramsJson, bool asLink);
 

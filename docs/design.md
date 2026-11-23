@@ -72,10 +72,10 @@
 | `activate`: load and raise app X | `{"action":"activated"}` (then `backend_registered`) or `{"action":"failed"}` |
 | `pending`: a request joined the pending list | `{"action":"open"}` when the person opens it (that is the click), or `{"action":"dismiss"}` |
 | `deliver`: the shell itself provides the intent | `{"action":"respond","ok":b,"data":d,"error":e}` |
-| `offer_install`: a provider could be installed | none: fire and forget, as today |
+| `offer_install`: nothing installed provides an intent; the presenter may offer one from its catalogue | none: fire and forget, as today |
 | `present`: raise the provider's app; `completed`: a dispatch completed, with `handoff`; `result`: the answer to the shell's own request; `dismiss`: take down an item already pulled | none: the frontend decides whether to return the person |
 
-Plus calls only the presenter makes: `declare_shell`, `set_installed` and `set_installable` (what is installed and what the catalogue offers), `register_click_token`, `backend_registered(app, module, instance)`, `backend_unregistered(app)`, `configure_provider` (headless), and `shell_request` for Basecamp's own requests and `basecamp://` links. A chooser work item lists installed providers, so the whole contract sits behind the presenter secret.
+Plus calls only the presenter makes: `declare_shell`, `set_installed` (what is installed), `register_click_token`, `backend_registered(app, module, instance)`, `backend_unregistered(app)`, and `shell_request` for Basecamp's own requests and `basecamp://` links. A chooser work item lists installed providers, so the whole contract sits behind the presenter secret.
 
 **How the presenter gets its secret** (decided 2026-11-04). The host loads `intents_module` straight after `capability_module`, before any app, and at once calls `claim()`. `intents_module` accepts the claim only from a `Host` caller (`currentCaller().isHost()`), only once, and answers with a fresh secret. Every presenter method after that requires the secret.
 - **Why not hand the secret over at start.** The only private parent → child channel is the container's stdin pipe, which carries the module's auth token once and is then closed. Command-line arguments are readable by every process of the same user. Adding a second secret to the pipe would change `logos-container-subprocess`, `logos_host` and liblogos's loader API: a core change, for a protocol the new core replaces.
@@ -125,7 +125,7 @@ module intents_presenter {             // contracts/intents_presenter.lidl, fron
   method backend_registered(secret: tstr, app: tstr, module: tstr, instance: tstr) -> tstr
   method backend_unregistered(secret: tstr, app: tstr) -> tstr
   method shell_request(secret: tstr, intent: tstr, params_json: tstr, as_link: bool) -> tstr   // the shell's own requests, basecamp:// links
-  // also declare_shell, set_installed, set_installable, configure_provider
+  // also declare_shell, set_installed
   event work_available(counter: uint)                           // a counter only, no content
 }
 ```
@@ -193,7 +193,7 @@ wallet module ─request─► intents_module ─deliver─► CLI app ─► pr
 intents_module ─result─► wallet module
 ```
 
-**D. Headless daemon, no presenter**
+**D. Headless daemon, no presenter** (not built: `headless` mode and `configure_provider` were removed on 2026-11-23 until a daemon presenter is designed; until a presenter claims, every request is `unavailable`)
 ```
 request ─► intents_module: one configured provider → deliver
                            a human choice needed → unavailable
@@ -256,8 +256,8 @@ The broker used to be inside Basecamp's process. As a module, it is reachable an
 
 | # | Issue | Handling |
 |---|---|---|
-| 10 | Provider identity is a name from unsigned `metadata.json`. | A CLI prompt shows the package name and whether it is signed, as Basecamp's chooser does. A headless daemon's config names the provider explicitly. |
-| 11 | A config-chosen provider can be silently rerouted by editing the config. | Only the host may set it, and every change is logged. |
+| 10 | Provider identity is a name from unsigned `metadata.json`. | A CLI prompt shows the package name and whether it is signed, as Basecamp's chooser does. |
+| 11 | A config-chosen provider can be silently rerouted by editing the config. | Only the host may set it, and every change is logged. (Moot for now: `configure_provider` was removed with `headless`.) |
 | 12 | Two presenters on one core. | Impossible: one presenter per core, fixed at startup, no handover. |
 | 13 | `basecamp://` links, catalog install offers, grants by role. | They stay in Basecamp's presenter. Only the presenter may submit as the link requester. |
 | 14 | The module crashes mid-request. | Fail closed: in-flight requests answer `failed`, and frontends clear stale dialogs. |

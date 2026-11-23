@@ -45,14 +45,6 @@ std::vector<std::string> stringList(const json* v)
     return out;
 }
 
-std::map<std::string, std::vector<std::string>> stringListMap(const json* v)
-{
-    std::map<std::string, std::vector<std::string>> out;
-    if (!v || !v->is_object()) return out;
-    for (auto it = v->begin(); it != v->end(); ++it) out[it.key()] = stringList(&it.value());
-    return out;
-}
-
 } // namespace
 
 IntentsService::IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config,
@@ -271,7 +263,6 @@ std::string IntentsService::claim(const std::string& optionsJson)
                                         : std::string("interactive");
     if (attention == "interactive") m_broker.setAttention(Attention::Interactive);
     else if (attention == "immediate") m_broker.setAttention(Attention::Immediate);
-    else if (attention == "headless") m_broker.setAttention(Attention::Headless);
     else return refusal("bad_options");
 
     m_secret = m_mintId() + m_mintId();
@@ -378,17 +369,6 @@ std::string IntentsService::setInstalled(const std::string& secret, const std::s
     return out.dump();
 }
 
-std::string IntentsService::setInstallable(const std::string& secret, const std::string& catalogJson)
-{
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!presenterCall(secret, "set_installable")) return refusal("refused");
-    const json catalog = parseBounded(catalogJson, kPresenterLimits);
-    if (!catalog.is_object()) return refusal("bad_request");
-    m_registry.setInstallable(stringListMap(findKey(catalog, "byName")),
-                              stringListMap(findKey(catalog, "webByName")));
-    return reply(true);
-}
-
 std::string IntentsService::declareShell(const std::string& secret, const std::string& shellJson)
 {
     std::vector<Effect> effects;
@@ -438,16 +418,6 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
     if (link) m_registry.registerLinkRequester(linkName, stringList(findKey(*link, "webIntents")));
     m_broker.dropStaleBackends(m_clock());
     return json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
-}
-
-std::string IntentsService::configureProvider(const std::string& secret, const std::string& intent,
-                                              const std::string& provider)
-{
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!presenterCall(secret, "configure_provider")) return refusal("refused");
-    if (!isValidName(intent) || (!provider.empty() && !isValidPackageName(provider))) return reply(false);
-    m_broker.configureProvider(intent, provider);
-    return reply(true);
 }
 
 std::string IntentsService::shellRequest(const std::string& secret, const std::string& intent,

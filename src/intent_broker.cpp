@@ -60,17 +60,6 @@ IntentBroker::IntentBroker(IntentRegistry& registry, IdFn mintId, BrokerConfig c
 {
 }
 
-void IntentBroker::configureProvider(const std::string& intent, const std::string& provider)
-{
-    if (provider.empty()) {
-        m_configured.erase(intent);
-        logLine("headless provider for " + intent + " cleared");
-        return;
-    }
-    m_configured[intent] = provider;
-    logLine("headless provider for " + intent + " set to " + provider);
-}
-
 IntentBroker::Request* IntentBroker::find(const std::string& id)
 {
     const auto it = m_open.find(id);
@@ -351,19 +340,8 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
         return;
     }
 
-    if (m_attention == Attention::Headless) {
-        const IntentRegistry::Resolution resolution = m_registry.resolveFor(requester, intent);
-        const auto configured = m_configured.find(intent);
-        const bool usable = configured != m_configured.end()
-            && std::any_of(resolution.found.begin(), resolution.found.end(),
-                           [&](const IntentRegistry::ProviderEntry& e) {
-                               return e.moduleName == configured->second;
-                           });
-        if (!usable) {
-            failWithFloor(id, err::unavailable, Path::Rejected, now);
-            return;
-        }
-        selectProvider(id, configured->second, now);
+    if (m_attention == Attention::Unclaimed) {
+        failWithFloor(id, err::unavailable, Path::Rejected, now);
         return;
     }
 
@@ -382,7 +360,7 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
 
     const IntentRegistry::Resolution resolution = m_registry.resolveFor(requester, intent);
     if (resolution.status == IntentRegistry::Status::None) {
-        offerInstall(requester, intent, now);
+        offerInstall(intent, now);
         failWithFloor(id, err::unavailable, Path::Rejected, now);
         return;
     }
@@ -418,17 +396,15 @@ void IntentBroker::park(const std::string& id, std::int64_t now)
                                 WorkTarget{WorkKind::Pending, id});
 }
 
-void IntentBroker::offerInstall(const std::string& requester, const std::string& intent,
-                                std::int64_t now)
+void IntentBroker::offerInstall(const std::string& intent, std::int64_t now)
 {
-    // The presenter may offer an install; the requester learns nothing either way.
-    const std::vector<std::string> installable = m_registry.installableFor(requester, intent);
-    if (installable.empty()) return;
-    // One offer per intent a minute: requests can't become a stream of prompts.
+    // The presenter, which has the catalogue, may offer an install; the
+    // requester learns nothing either way. One offer per intent a minute:
+    // requests can't become a stream of prompts.
     const auto last = m_lastOffer.find(intent);
     if (last != m_lastOffer.end() && now - last->second < m_config.offerCooldownMs) return;
     m_lastOffer[intent] = now;
-    pushWork(json{{"kind", "offer_install"}, {"intent", intent}, {"candidates", installable}});
+    pushWork(json{{"kind", "offer_install"}, {"intent", intent}});
 }
 
 bool IntentBroker::aChoiceIsOnScreen() const
@@ -544,8 +520,6 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
             r->providerModule = b->second.module;
             r->providerGeneration = b->second.generation;
             dispatch(id, now);
-        } else if (m_attention == Attention::Headless) {
-            failWithFloor(id, err::unavailable, Path::Rejected, now);
         } else {
             r->phase = Phase::Activating;
             r->phaseSince = now;
@@ -667,8 +641,7 @@ void IntentBroker::dispatch(const std::string& id, std::int64_t now)
     }
 
     // Raise the provider's window. The presenter decides how; a terminal ignores it.
-    if (m_registry.typeOf(r->provider) == "ui_qml" && r->provider != r->requester
-        && m_attention != Attention::Headless) {
+    if (m_registry.typeOf(r->provider) == "ui_qml" && r->provider != r->requester) {
         pushWork(json{{"kind", "present"}, {"app", r->provider}, {"dispatch", id}});
         r->didNavigate = true;
     }

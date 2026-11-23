@@ -10,9 +10,7 @@ module intents_presenter {
   method backend_registered(secret: tstr, app: tstr, module: tstr, instance: tstr) -> tstr
   method backend_unregistered(secret: tstr, app: tstr) -> tstr
   method set_installed(secret: tstr, packages_json: tstr) -> tstr
-  method set_installable(secret: tstr, catalog_json: tstr) -> tstr
   method declare_shell(secret: tstr, shell_json: tstr) -> tstr
-  method configure_provider(secret: tstr, intent: tstr, provider: tstr) -> tstr
   method shell_request(secret: tstr, intent: tstr, params_json: tstr, as_link: bool) -> tstr
 
   event work_available(counter: uint)

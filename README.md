@@ -67,7 +67,9 @@ it: nothing about what is installed is decided before then.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
 values); 16 requests open and 4 in the pending list at a time; results are kept
-for 10 minutes, or until `cancel(handle, receipt)`, within 4 MiB.
+for 10 minutes, or until `cancel(handle, receipt)`, within 4 MiB. Cancelling
+withdraws a request; it doesn't stop a provider that already took it (see
+Providing).
 
 **Restarts.** If `intents_module` restarts, its requests are gone: `result()`
 answers `unknown_handle`. Watch your subscription's status (`LpClient`'s
@@ -82,6 +84,12 @@ when `logos::currentCaller().isModule("intents_module")`, and return
 `{"ok":true}` at once — within 5 seconds, or the provider counts as unreachable.
 Then answer with `respond(dispatch, ok, data_json, error)`, data of at most
 1 MiB. If a person has to see something, show it through your own view.
+
+**Cancelling.** A requester's `cancel` withdraws the request and drops its
+result. The provider isn't told, and a later `respond` from it is dropped.
+Nothing it already started (a transfer, a signature) is stopped or undone, so
+a provider that acts on a delivery should have the person confirm in its own
+view first. There is no cancellation protocol for providers yet.
 
 An app's provider is its backend: the presenter tells `intents_module` which
 backend it registered for which app, and only that backend may respond. With
@@ -103,8 +111,13 @@ installed packages:
 
 ```
 claim({"attention": "interactive" | "immediate" | "headless"}) -> { ok, secret }
-declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module) ...
+declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module, instance) ...
 ```
+
+`instance` names one run of the backend. Registering the same app, module and
+instance again changes nothing; another instance, or an empty one, is a new
+backend, and whatever was dispatched to the one before fails. The host
+unregisters a backend when that run stops.
 
 - `interactive` (Basecamp): a request pops up only with a click token behind it;
   otherwise it waits in the pending list.
@@ -124,7 +137,8 @@ fires, and answers items with `answer(secret, id, {...})`:
 | `present` {app}, `offer_install` {intent, candidates}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
 
 An item that ends before the presenter pulled it is withdrawn from the queue;
-`dismiss` is only for items the presenter already has. Install offers come only
+`dismiss` is only for items the presenter already has. A pick of a provider that
+changed while the chooser was open is taken, and a new `choose` follows. Install offers come only
 for clicked or opened requests, once per intent a minute.
 
 Package and module names in work items are plain (`[A-Za-z0-9_.-]`, the

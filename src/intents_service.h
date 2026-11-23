@@ -58,7 +58,7 @@ public:
     std::string registerClickToken(const std::string& secret, const std::string& token,
                                    const std::string& app, const std::string& intent);
     std::string backendRegistered(const std::string& secret, const std::string& app,
-                                  const std::string& module);
+                                  const std::string& module, const std::string& instance = {});
     std::string backendUnregistered(const std::string& secret, const std::string& app);
     std::string setInstalled(const std::string& secret, const std::string& packagesJson);
     std::string setInstallable(const std::string& secret, const std::string& catalogJson);

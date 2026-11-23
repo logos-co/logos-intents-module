@@ -521,6 +521,53 @@ LOGOS_TEST(requests_past_the_rate_are_refused_in_the_reply)
     LOGOS_ASSERT_EQ(admitted, 20);
 }
 
+// A new shell declaration replaces the restrictions whole, never adds to them,
+// and one that can't be read changes nothing.
+LOGOS_TEST(a_shell_declaration_replaces_its_restrictions_whole)
+{
+    Basecamp h("immediate");
+    h.install(json::array({json{{"name", "cleanup_module"},
+                                {"installDir", h.dir.add("cleanup_module",
+                                                         pkg("cleanup_module", "core", json::array(),
+                                                             intentList({"basecamp.packages.confirm_uninstall"})))}}}));
+    const auto ask = [&]() {
+        const CallCaller m = CallCaller::module("cleanup_module");
+        h.service->request("basecamp.packages.confirm_uninstall", "{}", "");
+    };
+    const auto declare = [&](const json& shell) {
+        const CallCaller host = CallCaller::host();
+        return h.call(h.service->declareShell(h.secret, shell.dump()))["ok"].get<bool>();
+    };
+    ask();
+    LOGOS_ASSERT_TRUE(workOfKind(h.work(), "deliver").empty());   // only package_manager_ui may
+
+    json shell = json::parse(kBasecampShell);
+    shell["restricted"] = json{{"basecamp.packages.confirm_upgrade", {"package_manager_ui"}}};
+    LOGOS_ASSERT_TRUE(declare(shell));
+    ask();
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "deliver").size(), std::size_t(1));
+
+    json empty = shell;
+    empty["restricted"] = json{{"basecamp.packages.confirm_upgrade", json::array()}};
+    LOGOS_ASSERT_FALSE(declare(empty));
+    json notAnObject = shell;
+    notAnObject["restricted"] = "everyone";
+    LOGOS_ASSERT_FALSE(declare(notAnObject));
+    ask();
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "deliver").size(), std::size_t(1));
+}
+
+// Each of the presenter's own requests ends as a work item, so they have a rate too.
+LOGOS_TEST(the_presenters_own_requests_have_a_rate_too)
+{
+    Basecamp h("interactive");
+    int admitted = 0;
+    const CallCaller host = CallCaller::host();
+    for (int i = 0; i < 100; ++i)
+        if (h.call(h.service->shellRequest(h.secret, "packages.show", "{}", false))["ok"].get<bool>()) ++admitted;
+    LOGOS_ASSERT_EQ(admitted, 20);
+}
+
 LOGOS_TEST(settled_is_never_sent_before_the_request_returns)
 {
     BrokerConfig instant;

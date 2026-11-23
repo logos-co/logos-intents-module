@@ -92,7 +92,10 @@ public:
     // ── App backends, as the presenter registered them ─────────────────
     // Refused when the app isn't an installed ui_qml package, when `module` is
     // an installed package's name, or when it already serves another app.
-    bool registerBackend(const std::string& app, const std::string& module, std::int64_t now);
+    // `instance` names the backend's run: the same one again changes nothing;
+    // another, or none, is a new backend.
+    bool registerBackend(const std::string& app, const std::string& module, std::int64_t now,
+                         const std::string& instance = {});
     void unregisterBackend(const std::string& app, std::int64_t now);
     // After the installed set or the shell changes: drops every registration
     // registerBackend() would now refuse.
@@ -169,6 +172,7 @@ private:
 
         bool choicePresented = false;
         json choiceProviders = json::array();
+        std::map<std::string, std::uint64_t> choiceRevisions;   // provider -> revision shown
         std::string choiceWorkId;
         std::string pendingWorkId;
         std::string deliverWorkId;
@@ -192,6 +196,7 @@ private:
     struct Backend {
         std::string module;
         std::uint64_t generation = 0;
+        std::string instance;
     };
 
     struct Bucket {
@@ -206,18 +211,35 @@ private:
     };
 
     struct WorkItem {
+        // What a full queue may drop: a notice first, then an outcome the
+        // presenter would only read. An item someone must answer, never.
+        enum class Keep { Notice, Outcome, Answer };
         std::string id;
-        bool notice = false;   // nothing waits on it: safe to drop
+        Keep keep = Keep::Answer;
         json item;
+    };
+
+    // Over its limits: answered only after the floor, from outside the open requests.
+    struct Refusal {
+        std::string requester;
+        std::string receipt;
+        std::string code;
+        std::int64_t due = 0;
+        bool fromPresenter = false;
+    };
+
+    struct Activation {
+        std::vector<std::string> ids;   // the requests waiting on the app
+        std::string workId;             // its `activate`, until the presenter answers
     };
 
     std::string backendRefusal(const std::string& app, const std::string& module) const;
     void start(const std::string& id, std::int64_t now);
     void park(const std::string& id, std::int64_t now);
     void offerInstall(const std::string& requester, const std::string& intent, std::int64_t now);
-    void presentChoice(const std::string& id, const std::vector<IntentRegistry::ProviderEntry>& found,
-                       std::int64_t now);
-    void showChoice(Request& r, std::int64_t now);
+    void presentChoice(const std::string& id, std::int64_t now);
+    bool showChoice(const std::string& id, std::int64_t now);
+    bool stillEligible(const Request& r, const std::string& provider) const;
     void presentNextChoice(std::int64_t now);
     bool aChoiceIsOnScreen() const;
     void selectProvider(const std::string& id, const std::string& provider, std::int64_t now);
@@ -227,9 +249,13 @@ private:
     void failWithFloor(const std::string& id, const std::string& code, Path path, std::int64_t now);
     void finish(const std::string& id, bool ok, const json& data, const std::string& error,
                 Path path, std::int64_t now);
-    void keepResult(const Request& r, json envelope, std::int64_t now);
+    void keepResult(const std::string& requester, const std::string& handle, const std::string& receipt,
+                    json envelope, std::int64_t now);
+    void holdRefusal(const Request& r, const std::string& code, std::int64_t now);
+    void settleRefusal(const std::string& handle, const Refusal& refusal, std::int64_t now);
     void eraseSettled(std::map<std::string, Settled>::iterator it);
     void drainActivation(const std::string& app, bool ready, std::int64_t now);
+    void endActivation(const std::string& app);
     std::string pushWork(json item, std::optional<WorkTarget> target = std::nullopt);
     void dropWorkTarget(const std::string& workId);
     Request* find(const std::string& id);
@@ -244,11 +270,12 @@ private:
     std::map<std::string, Request> m_open;            // dispatch id -> request
     std::map<std::string, std::string> m_byHandle;    // handle -> dispatch id
     std::map<std::string, Settled> m_settled;         // handle -> result
+    std::map<std::string, Refusal> m_refused;         // handle -> refusal held to its floor
     std::size_t m_resultBytesTotal = 0;
     std::map<std::string, std::string> m_configured;  // intent -> provider (headless)
     std::map<std::string, Backend> m_backends;        // app -> backend
     std::uint64_t m_backendGeneration = 0;
-    std::map<std::string, std::vector<std::string>> m_activation;   // app -> dispatch ids
+    std::map<std::string, Activation> m_activation;   // app -> its activation
     std::map<std::string, Bucket> m_buckets;          // requester -> request tokens
     std::map<std::string, std::int64_t> m_lastOffer;  // intent -> last install offer
 

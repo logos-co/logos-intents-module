@@ -156,6 +156,7 @@ void IntentRegistry::declareShell(const std::string& shellName,
         else diagnose("shell: handoff for '" + forLog(intent) + "', which the shell doesn't provide — ignored");
     }
     m_shellEntry = {shellName, displayName.empty() ? shellName : displayName, iconSource};
+    ++m_shellRevision;
     installShell();
 
     // The namespace is reserved for packages already read too.
@@ -174,6 +175,7 @@ void IntentRegistry::declareShell(const std::string& shellName,
             it = intentSet.erase(it);
         }
     }
+    recomputeInstallable();
 }
 
 void IntentRegistry::resetPackages()
@@ -187,7 +189,6 @@ void IntentRegistry::resetPackages()
     m_webReachable.clear();
     m_webIntents.clear();
     m_diagnostics.clear();
-    m_installableInput.reset();
     installShell();
 }
 
@@ -206,6 +207,10 @@ void IntentRegistry::rebuild(const std::vector<LoadedPackage>& packages)
         }
         ingest(p.name, p.metadata, p.displayName, p.iconSource);
     }
+    // Only what is installed: a package back after an uninstall is a new one.
+    for (auto it = m_seen.begin(); it != m_seen.end();)
+        it = m_types.count(it->first) ? std::next(it) : m_seen.erase(it);
+    recomputeInstallable();
 }
 
 std::vector<std::string> IntentRegistry::parseUses(const json* raw, const std::string& name)
@@ -333,6 +338,11 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
     std::vector<Provide> provides = parseProvides(findKey(metadata, "provides"), name);
     const std::vector<std::string> uses = parseUses(findKey(metadata, "uses"), name);
 
+    const std::string fingerprint = metadata.dump(-1, ' ', false, json::error_handler_t::replace)
+        + '\x1f' + displayName + '\x1f' + iconSource;
+    Seen& seen = m_seen[name];
+    if (seen.revision == 0 || seen.fingerprint != fingerprint) seen = Seen{fingerprint, ++m_lastRevision};
+
     m_types[name] = type;
     m_entries[name] = {name, displayName.empty() ? name : displayName, iconSource};
     for (Provide& p : provides) {
@@ -349,16 +359,18 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
     if (!uses.empty()) m_uses[name] = std::set<std::string>(uses.begin(), uses.end());
 }
 
-void IntentRegistry::restrictIntentToRequesters(const std::string& intent,
-                                                const std::vector<std::string>& requesters)
+void IntentRegistry::setRestrictions(const std::map<std::string, std::vector<std::string>>& restricted)
 {
-    if (intent.empty()) return;
-    // An empty list would store as "unrestricted".
-    if (requesters.empty()) {
-        diagnose("shell: refusing an empty requester list for '" + forLog(intent) + "'");
-        return;
+    m_restricted.clear();
+    for (const auto& [intent, requesters] : restricted) {
+        if (intent.empty()) continue;
+        // An empty list would store as "unrestricted".
+        if (requesters.empty()) {
+            diagnose("shell: refusing an empty requester list for '" + forLog(intent) + "'");
+            continue;
+        }
+        m_restricted[intent] = requesters;
     }
-    m_restricted[intent] = requesters;
 }
 
 bool IntentRegistry::requesterAllowed(const std::string& intent, const std::string& requester) const
@@ -436,6 +448,13 @@ bool IntentRegistry::declaresUse(const std::string& name, const std::string& int
     return it != m_uses.end() && it->second.count(intent);
 }
 
+std::uint64_t IntentRegistry::revisionOf(const std::string& name) const
+{
+    if (isShell(name)) return m_shellRevision;
+    const auto it = m_seen.find(name);
+    return it == m_seen.end() || !m_types.count(name) ? 0 : it->second.revision;
+}
+
 bool IntentRegistry::declaresProvide(const std::string& name, const std::string& intent) const
 {
     const auto it = m_provides.find(name);
@@ -480,10 +499,18 @@ bool IntentRegistry::setInstallable(const std::map<std::string, std::vector<std:
         && m_installableInput->second == webByName)
         return false;
     m_installableInput.emplace(byName, webByName);
+    recomputeInstallable();
+    return true;
+}
 
+// Derived from the catalogue and from what is installed, so redone when either changes.
+void IntentRegistry::recomputeInstallable()
+{
     m_installable.clear();
     m_installableWeb.clear();
     m_installableWebIntents.clear();
+    if (!m_installableInput) return;
+    const auto& [byName, webByName] = *m_installableInput;
     for (const auto& [name, intentList] : byName) {
         // Installed packages are answered by the real table.
         if (!isValidPackageName(name) || m_types.count(name)) continue;
@@ -503,7 +530,6 @@ bool IntentRegistry::setInstallable(const std::map<std::string, std::vector<std:
         }
     }
     for (auto& [intent, names] : m_installable) std::sort(names.begin(), names.end());
-    return true;
 }
 
 std::vector<std::string> IntentRegistry::installableFor(const std::string& requester,

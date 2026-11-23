@@ -314,14 +314,14 @@ std::string IntentsService::registerClickToken(const std::string& secret, const 
 }
 
 std::string IntentsService::backendRegistered(const std::string& secret, const std::string& app,
-                                              const std::string& module)
+                                              const std::string& module, const std::string& instance)
 {
     std::vector<Effect> effects;
     bool ok = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!presenterCall(secret, "backend_registered")) return refusal("refused");
-        ok = m_broker.registerBackend(app, module, m_clock());
+        ok = m_broker.registerBackend(app, module, m_clock(), instance);
         if (ok) m_clickTokens.erase(app);
         effects = m_broker.takeEffects();
     }
@@ -412,6 +412,16 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
     const json* link = findKey(shell, "link");
     const std::string linkName = link ? stringAt(*link, "name") : std::string();
     if (link && (!isValidPackageName(linkName) || linkName == name)) return bad();
+    // Replaced whole, so read whole first: one that can't be leaves the last standing.
+    std::map<std::string, std::vector<std::string>> restricted;
+    if (const json* given = findKey(shell, "restricted")) {
+        if (!given->is_object()) return bad();
+        for (auto it = given->begin(); it != given->end(); ++it) {
+            std::vector<std::string> requesters = stringList(&it.value());
+            if (!isValidName(it.key()) || requesters.empty()) return bad();
+            restricted[it.key()] = std::move(requesters);
+        }
+    }
 
     m_registry.declareShell(name, prefix,
                             stringList(findKey(shell, "uses")),
@@ -419,9 +429,7 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
                             stringList(findKey(shell, "handoff")),
                             stringAt(shell, "displayName"),
                             stringAt(shell, "iconSource"));
-    if (const json* restricted = findKey(shell, "restricted"); restricted && restricted->is_object())
-        for (auto it = restricted->begin(); it != restricted->end(); ++it)
-            m_registry.restrictIntentToRequesters(it.key(), stringList(&it.value()));
+    m_registry.setRestrictions(restricted);
     if (link) m_registry.registerLinkRequester(linkName, stringList(findKey(*link, "webIntents")));
     m_broker.dropStaleBackends(m_clock());
     return json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
@@ -447,6 +455,8 @@ std::string IntentsService::shellRequest(const std::string& secret, const std::s
         if (!presenterCall(secret, "shell_request")) return refusal("refused");
         const std::string requester = asLink ? m_registry.linkName() : m_registry.shellName();
         if (requester.empty()) return refusal(err::notDeclared);
+        // Each one ends as a work item, so the presenter's own requests have a rate too.
+        if (!m_broker.admit(requester, m_clock())) return refusal(err::failed);
         const json params = paramsJson.empty() ? json::object() : parseBounded(paramsJson, kPayloadLimits);
         const IntentBroker::Ticket t = m_broker.submit(requester, intent, params, /*clicked=*/true,
                                                        /*fromPresenter=*/true, m_clock());

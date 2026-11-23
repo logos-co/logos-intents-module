@@ -9,9 +9,9 @@ namespace intents {
 
 namespace {
 
-// Past this, the oldest notice goes. Items someone must answer are never
-// dropped; they're bounded by the per-requester limits instead.
-constexpr std::size_t kSoftWorkLimit = 1000;
+// Past this, the oldest item nothing waits on goes. Items someone must answer
+// stay: there are never more of them than open requests and apps being raised.
+constexpr std::size_t kWorkLimit = 1000;
 
 void logLine(const std::string& line)
 {
@@ -98,13 +98,19 @@ std::string IntentBroker::pushWork(json item, std::optional<WorkTarget> target)
     const std::string id = m_mintId();
     item["id"] = id;
     const std::string kind = stringAt(item, "kind");
-    const bool notice = kind == "present" || kind == "offer_install" || kind == "completed";
-    if (m_work.size() >= kSoftWorkLimit) {
-        const auto oldest = std::find_if(m_work.begin(), m_work.end(),
-                                         [](const WorkItem& w) { return w.notice; });
+    using Keep = WorkItem::Keep;
+    const Keep keep = kind == "present" || kind == "offer_install" || kind == "completed" ? Keep::Notice
+                    : kind == "result" || kind == "dismiss" ? Keep::Outcome
+                    : Keep::Answer;
+    if (m_work.size() >= kWorkLimit) {
+        auto oldest = std::find_if(m_work.begin(), m_work.end(),
+                                   [](const WorkItem& w) { return w.keep == Keep::Notice; });
+        if (oldest == m_work.end())
+            oldest = std::find_if(m_work.begin(), m_work.end(),
+                                  [](const WorkItem& w) { return w.keep == Keep::Outcome; });
         if (oldest != m_work.end()) m_work.erase(oldest);
     }
-    m_work.push_back(WorkItem{id, notice, std::move(item)});
+    m_work.push_back(WorkItem{id, keep, std::move(item)});
     if (target) m_workTargets[id] = *target;
     ++m_workCounter;
     m_workSignalled = true;
@@ -160,7 +166,7 @@ std::string IntentBroker::backendRefusal(const std::string& app, const std::stri
 }
 
 bool IntentBroker::registerBackend(const std::string& app, const std::string& module,
-                                   std::int64_t now)
+                                   std::int64_t now, const std::string& instance)
 {
     if (app.empty() || !isValidPackageName(module)) return false;
     if (const std::string why = backendRefusal(app, module); !why.empty()) {
@@ -173,9 +179,13 @@ bool IntentBroker::registerBackend(const std::string& app, const std::string& mo
             return false;
         }
     }
-    // A new instance is a new backend: what was dispatched to the old one fails.
-    if (m_backends.count(app)) unregisterBackend(app, now);
-    m_backends[app] = Backend{module, ++m_backendGeneration};
+    if (const auto known = m_backends.find(app); known != m_backends.end()) {
+        if (!instance.empty() && known->second.module == module && known->second.instance == instance)
+            return true;
+        // A new instance is a new backend: what was dispatched to the old one fails.
+        unregisterBackend(app, now);
+    }
+    m_backends[app] = Backend{module, ++m_backendGeneration, instance};
     drainActivation(app, /*ready=*/true, now);
     return true;
 }
@@ -263,13 +273,18 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     const bool withinLimit = countOpen(requester) < m_config.maxOpenPerRequester
         && m_open.size() < m_config.maxOpenTotal
         && openBytes(requester) + bytes <= m_config.maxOpenBytesPerRequester;
-    if (payloadOk && withinLimit) {
+    const Ticket ticket{r.handle, r.receipt};
+    if (!withinLimit) {
+        logLine("refused " + forLog(intent, 64) + " from " + requester + ": over its open-request limits");
+        holdRefusal(r, err::failed, now);
+        return ticket;
+    }
+    if (payloadOk) {
         r.params = params;
         r.paramsBytes = bytes;
     }
 
     const std::string id = r.dispatchId;
-    const Ticket ticket{r.handle, r.receipt};
     m_byHandle[r.handle] = id;
     m_open.emplace(id, std::move(r));
 
@@ -278,13 +293,36 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     if (!payloadOk) {
         logLine("refused " + forLog(intent, 64) + " from " + requester + ": params are not plain data");
         failWithFloor(id, err::badRequest, Path::Rejected, now);
-    } else if (!withinLimit) {
-        logLine("refused " + forLog(intent, 64) + " from " + requester + ": over its open-request limits");
-        failWithFloor(id, err::failed, Path::Rejected, now);
     } else {
         start(id, now);
     }
     return ticket;
+}
+
+// Kept apart from the open requests, so their limit holds while the refusal
+// waits out its floor. Past as many again, it settles at once.
+void IntentBroker::holdRefusal(const Request& r, const std::string& code, std::int64_t now)
+{
+    const Refusal refusal{r.requester, r.receipt, code, r.acceptedAt + m_config.errorFloorMs, r.fromPresenter};
+    if (now >= refusal.due || m_refused.size() >= m_config.maxOpenTotal) {
+        settleRefusal(r.handle, refusal, now);
+        return;
+    }
+    m_refused[r.handle] = refusal;
+}
+
+void IntentBroker::settleRefusal(const std::string& handle, const Refusal& refusal, std::int64_t now)
+{
+    json envelope = makeEnvelope(false, json(), refusal.code);
+    if (refusal.fromPresenter) {
+        pushWork(json{{"kind", "result"}, {"handle", handle}, {"result", std::move(envelope)}});
+        return;
+    }
+    keepResult(refusal.requester, handle, refusal.receipt, std::move(envelope), now);
+    Effect e;
+    e.kind = Effect::Kind::Settled;
+    e.handle = handle;
+    m_effects.push_back(std::move(e));
 }
 
 void IntentBroker::start(const std::string& id, std::int64_t now)
@@ -353,7 +391,7 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
         }
     }
 
-    presentChoice(id, resolution.found, now);
+    presentChoice(id, now);
 }
 
 void IntentBroker::park(const std::string& id, std::int64_t now)
@@ -394,50 +432,75 @@ bool IntentBroker::aChoiceIsOnScreen() const
     return false;
 }
 
-void IntentBroker::presentChoice(const std::string& id,
-                                 const std::vector<IntentRegistry::ProviderEntry>& found,
-                                 std::int64_t now)
+void IntentBroker::presentChoice(const std::string& id, std::int64_t now)
 {
     Request* r = find(id);
     if (!r) return;
-    json providers = json::array();
-    for (const IntentRegistry::ProviderEntry& e : found) {
-        providers.push_back(json{{"module", e.moduleName},
-                                 {"displayName", displaySafe(e.displayName)},
-                                 {"iconSource", e.iconSource}});
-    }
     r->phase = Phase::AwaitingChoice;
     r->phaseSince = now;
-    r->choiceProviders = providers;
 
     // Queue, never re-point a chooser that is showing: a click meant for the
     // request the person read would answer the one that just arrived.
     if (aChoiceIsOnScreen()) return;
-    showChoice(*r, now);
+    showChoice(id, now);
 }
 
-void IntentBroker::showChoice(Request& r, std::int64_t now)
+// Resolved when shown, not when queued: the person sees what is there now.
+// False when nothing is, and the request fails instead.
+bool IntentBroker::showChoice(const std::string& id, std::int64_t now)
 {
-    r.choicePresented = true;
-    r.phaseSince = now;   // the person's time starts when it's shown
-    r.choiceWorkId = pushWork(json{{"kind", "choose"},
-                                   {"dispatch", r.dispatchId},
-                                   {"intent", r.intent},
-                                   {"requester", displaySafe(r.requester)},
-                                   {"providers", r.choiceProviders}},
-                              WorkTarget{WorkKind::Choose, r.dispatchId});
+    Request* r = find(id);
+    if (!r) return false;
+    const IntentRegistry::Resolution current = m_registry.resolveFor(r->requester, r->intent);
+    if (current.found.empty() || !m_registry.requesterAllowed(r->intent, r->requester)) {
+        failWithFloor(id, err::unavailable, Path::Rejected, now);
+        return false;
+    }
+    json providers = json::array();
+    r->choiceRevisions.clear();
+    for (const IntentRegistry::ProviderEntry& e : current.found) {
+        providers.push_back(json{{"module", e.moduleName},
+                                 {"displayName", displaySafe(e.displayName)},
+                                 {"iconSource", e.iconSource}});
+        r->choiceRevisions[e.moduleName] = m_registry.revisionOf(e.moduleName);
+    }
+    r->choiceProviders = providers;
+    r->choicePresented = true;
+    r->phaseSince = now;   // the person's time starts when it's shown
+    r->choiceWorkId = pushWork(json{{"kind", "choose"},
+                                    {"dispatch", id},
+                                    {"intent", r->intent},
+                                    {"requester", displaySafe(r->requester)},
+                                    {"providers", providers}},
+                               WorkTarget{WorkKind::Choose, id});
+    return true;
 }
 
 void IntentBroker::presentNextChoice(std::int64_t now)
 {
-    if (aChoiceIsOnScreen()) return;
-    // Oldest first, so which request the person answers doesn't depend on map order.
-    Request* oldest = nullptr;
-    for (auto& [id, r] : m_open) {
-        if (r.phase != Phase::AwaitingChoice || r.choicePresented || r.floor) continue;
-        if (!oldest || r.acceptedAt < oldest->acceptedAt) oldest = &r;
+    while (!aChoiceIsOnScreen()) {
+        // Oldest first, so which request the person answers doesn't depend on map order.
+        const Request* oldest = nullptr;
+        for (const auto& [id, r] : m_open) {
+            if (r.phase != Phase::AwaitingChoice || r.choicePresented || r.floor) continue;
+            if (!oldest || r.acceptedAt < oldest->acceptedAt) oldest = &r;
+        }
+        if (!oldest) return;
+        const std::string id = oldest->dispatchId;
+        if (showChoice(id, now)) return;
     }
-    if (oldest) showChoice(*oldest, now);
+}
+
+// What made the provider one to show: still allowed, still reachable by this
+// requester, and still the package that was shown.
+bool IntentBroker::stillEligible(const Request& r, const std::string& provider) const
+{
+    const auto shown = r.choiceRevisions.find(provider);
+    if (shown == r.choiceRevisions.end() || shown->second != m_registry.revisionOf(provider)) return false;
+    if (!m_registry.requesterAllowed(r.intent, r.requester)) return false;
+    const IntentRegistry::Resolution current = m_registry.resolveFor(r.requester, r.intent);
+    return std::any_of(current.found.begin(), current.found.end(),
+                       [&](const IntentRegistry::ProviderEntry& e) { return e.moduleName == provider; });
 }
 
 void IntentBroker::selectProvider(const std::string& id, const std::string& provider,
@@ -471,12 +534,12 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
         } else {
             r->phase = Phase::Activating;
             r->phaseSince = now;
-            std::vector<std::string>& queue = m_activation[provider];
-            const bool alreadyAsked = !queue.empty();
-            queue.push_back(id);
+            Activation& activation = m_activation[provider];
+            const bool alreadyAsked = !activation.ids.empty();
+            activation.ids.push_back(id);
             if (!alreadyAsked)
-                pushWork(json{{"kind", "activate"}, {"app", provider}},
-                         WorkTarget{WorkKind::Activate, provider});
+                activation.workId = pushWork(json{{"kind", "activate"}, {"app", provider}},
+                                             WorkTarget{WorkKind::Activate, provider});
         }
     } else {
         failWithFloor(id, err::unavailable, Path::Rejected, now);
@@ -490,14 +553,8 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
 {
     const auto q = m_activation.find(app);
     if (q == m_activation.end()) return;
-    const std::vector<std::string> ids = q->second;
-    m_activation.erase(q);
-    for (auto it = m_workTargets.begin(); it != m_workTargets.end();) {
-        if (it->second.kind == WorkKind::Activate && it->second.target == app)
-            it = m_workTargets.erase(it);
-        else
-            ++it;
-    }
+    const std::vector<std::string> ids = q->second.ids;
+    endActivation(app);
     for (const std::string& id : ids) {
         Request* r = find(id);
         if (!r || r->phase != Phase::Activating || r->floor) continue;
@@ -510,6 +567,16 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
             failWithFloor(id, err::unavailable, Path::EndpointGone, now);
         }
     }
+}
+
+void IntentBroker::endActivation(const std::string& app)
+{
+    const auto a = m_activation.find(app);
+    if (a == m_activation.end()) return;
+    const std::string workId = a->second.workId;
+    m_activation.erase(a);
+    // Not pulled: taken back. Pulled and unanswered: the presenter takes it down.
+    dropWorkTarget(workId);
 }
 
 std::string IntentBroker::specViolation(const std::string& provider, const std::string& intent,
@@ -631,6 +698,12 @@ json IntentBroker::result(const std::string& requester, const std::string& handl
             return unknown;
         return json{{"ok", true}, {"state", "settled"}, {"result", s->second.envelope}};
     }
+    if (const auto f = m_refused.find(handle); f != m_refused.end()) {
+        if (f->second.fromPresenter || f->second.requester != requester
+            || !sameSecret(f->second.receipt, receipt))
+            return unknown;
+        return json{{"ok", true}, {"state", "pending"}};
+    }
     const auto h = m_byHandle.find(handle);
     if (h == m_byHandle.end()) return unknown;
     const auto o = m_open.find(h->second);
@@ -648,6 +721,16 @@ bool IntentBroker::cancel(const std::string& requester, const std::string& handl
         if (s->second.requester != requester || !sameSecret(s->second.receipt, receipt))
             return false;
         eraseSettled(s);
+        return true;
+    }
+    if (const auto f = m_refused.find(handle); f != m_refused.end()) {
+        if (f->second.fromPresenter || f->second.requester != requester
+            || !sameSecret(f->second.receipt, receipt))
+            return false;
+        Refusal withdrawn = f->second;
+        m_refused.erase(f);
+        withdrawn.code = err::cancelled;
+        settleRefusal(handle, withdrawn, now);
         return true;
     }
     const auto h = m_byHandle.find(handle);
@@ -685,24 +768,32 @@ bool IntentBroker::answer(const std::string& workId, const json& answer, std::in
         // Only one of the providers the person was shown.
         const bool offered = std::any_of(r->choiceProviders.begin(), r->choiceProviders.end(),
                                          [&](const json& p) { return stringAt(p, "module") == provider; });
-        if (provider.empty() || !offered || !m_registry.declaresProvide(provider, r->intent)) return false;
+        if (provider.empty() || !offered) return false;
         m_workTargets.erase(workId);
         r->choicePresented = false;
         r->choiceWorkId.clear();
+        // The registry may have changed under the chooser: ask again rather than
+        // deliver to what the person didn't see.
+        if (!stillEligible(*r, provider)) {
+            logLine(provider + " changed while the chooser for " + r->intent + " was open: asking again");
+            if (!showChoice(target.target, now)) presentNextChoice(now);
+            return true;
+        }
         selectProvider(target.target, provider, now);
         return true;
     }
-    case WorkKind::Activate:
-        if (action == "activated") {
-            // Ready only once its backend is registered; until then it waits.
-            if (m_backends.count(target.target)) drainActivation(target.target, true, now);
-            return true;
-        }
-        if (action == "failed") {
-            drainActivation(target.target, false, now);
-            return true;
-        }
-        return false;
+    case WorkKind::Activate: {
+        if (action != "activated" && action != "failed") return false;
+        // Ready only once its backend is registered; until then it waits.
+        const bool ready = action == "activated";
+        if (ready && !m_backends.count(target.target)) return true;
+        // Answered, so there is nothing left on screen to take down.
+        m_workTargets.erase(workId);
+        const auto a = m_activation.find(target.target);
+        if (a != m_activation.end() && a->second.workId == workId) a->second.workId.clear();
+        drainActivation(target.target, ready, now);
+        return true;
+    }
     case WorkKind::Pending: {
         Request* r = find(target.target);
         if (!r || r->phase != Phase::Pending || r->floor) return false;
@@ -767,7 +858,8 @@ void IntentBroker::eraseSettled(std::map<std::string, Settled>::iterator it)
     m_settled.erase(it);
 }
 
-void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
+void IntentBroker::keepResult(const std::string& requester, const std::string& handle,
+                              const std::string& receipt, json envelope, std::int64_t now)
 {
     const std::size_t bytes = approxBytes(envelope);
     // Make room: the requester's own oldest results first, then anyone's.
@@ -776,7 +868,7 @@ void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
         std::size_t held = 0;
         auto oldest = m_settled.end();
         for (auto s = m_settled.begin(); s != m_settled.end(); ++s) {
-            if (s->second.requester != r.requester) continue;
+            if (s->second.requester != requester) continue;
             ++count;
             held += s->second.bytes;
             if (oldest == m_settled.end() || s->second.at < oldest->second.at) oldest = s;
@@ -792,7 +884,7 @@ void IntentBroker::keepResult(const Request& r, json envelope, std::int64_t now)
             if (s->second.at < oldest->second.at) oldest = s;
         eraseSettled(oldest);
     }
-    m_settled[r.handle] = Settled{r.requester, r.receipt, std::move(envelope), now, bytes};
+    m_settled[handle] = Settled{requester, receipt, std::move(envelope), now, bytes};
     m_resultBytesTotal += bytes;
 }
 
@@ -808,10 +900,12 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
     if (!r.pendingWorkId.empty()) dropWorkTarget(r.pendingWorkId);
     if (!r.deliverWorkId.empty()) dropWorkTarget(r.deliverWorkId);
     if (!r.provider.empty()) {
-        const auto q = m_activation.find(r.provider);
-        if (q != m_activation.end()) {
-            q->second.erase(std::remove(q->second.begin(), q->second.end(), id), q->second.end());
-            if (q->second.empty()) m_activation.erase(q);
+        const auto a = m_activation.find(r.provider);
+        if (a != m_activation.end()) {
+            std::vector<std::string>& ids = a->second.ids;
+            ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
+            // The last one waiting: nothing may raise the app for it now.
+            if (ids.empty()) endActivation(r.provider);
         }
     }
 
@@ -820,7 +914,7 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
         m_byHandle.erase(r.handle);
         pushWork(json{{"kind", "result"}, {"handle", r.handle}, {"result", std::move(envelope)}});
     } else {
-        keepResult(r, std::move(envelope), now);
+        keepResult(r.requester, r.handle, r.receipt, std::move(envelope), now);
         Effect e;
         e.kind = Effect::Kind::Settled;
         e.handle = r.handle;
@@ -881,6 +975,17 @@ void IntentBroker::tick(std::int64_t now)
                 finish(id, false, json(), err::timeout, Path::Deadline, now);
             break;
         }
+    }
+
+    for (auto it = m_refused.begin(); it != m_refused.end();) {
+        if (now < it->second.due) {
+            ++it;
+            continue;
+        }
+        const std::string handle = it->first;
+        const Refusal refusal = it->second;
+        it = m_refused.erase(it);
+        settleRefusal(handle, refusal, now);
     }
 
     for (auto it = m_settled.begin(); it != m_settled.end();) {

@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -83,9 +84,9 @@ public:
     void ingest(const std::string& name, const json& metadata,
                 const std::string& displayName, const std::string& iconSource);
 
-    // Only `requesters` may ask for `intent`. Survives rebuild().
-    void restrictIntentToRequesters(const std::string& intent,
-                                    const std::vector<std::string>& requesters);
+    // Only the listed requesters may ask for each intent. The whole set,
+    // replacing the last one; survives rebuild().
+    void setRestrictions(const std::map<std::string, std::vector<std::string>>& restricted);
     bool requesterAllowed(const std::string& intent, const std::string& requester) const;
 
     Resolution resolve(const std::string& intent) const;
@@ -107,6 +108,9 @@ public:
 
     bool declaresUse(const std::string& name, const std::string& intent) const;
     bool declaresProvide(const std::string& name, const std::string& intent) const;
+    // Changes whenever what was read for the package does, across rebuilds;
+    // 0 for an unknown name.
+    std::uint64_t revisionOf(const std::string& name) const;
 
     // ── Links clicked outside the shell ─────────────────────────────────
     // The link requester's `uses` is derived: the shell's web intents plus every
@@ -136,6 +140,7 @@ private:
 
     bool isReservedNamespace(const std::string& intent) const;
     void resetPackages();
+    void recomputeInstallable();
     void installShell();
     void dropPackage(const std::string& name);
     void diagnose(const std::string& line);
@@ -151,6 +156,14 @@ private:
     std::set<std::string> m_webReachable;                          // "name/intent"
     std::map<std::string, int> m_webIntents;                       // intent -> web-reachable entries
     std::vector<std::string> m_diagnostics;
+
+    struct Seen {
+        std::string fingerprint;   // metadata and labels as last read
+        std::uint64_t revision = 0;
+    };
+    std::map<std::string, Seen> m_seen;   // survives rebuild(); installed packages only
+    std::uint64_t m_lastRevision = 0;
+    std::uint64_t m_shellRevision = 0;
 
     // Declared in code; survive rebuild().
     std::string m_shellName;

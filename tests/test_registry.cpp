@@ -136,14 +136,37 @@ LOGOS_TEST(installable_never_lists_installed_or_reserved)
                                          {"new_ui", {"share.text", "basecamp.apps.launch"}}}));
 }
 
+// The offers follow what is installed: a package installed since the catalogue
+// came is answered by the real table, and offered again once it is gone.
+LOGOS_TEST(install_offers_follow_what_is_installed)
+{
+    IntentRegistry r = withShell();
+    r.registerLinkRequester("basecamp_link", {});
+    r.setInstallable({{"sharer_ui", {"share.text"}}}, {{"sharer_ui", {"share.text"}}});
+    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(1));
+
+    const json sharer = pkg("sharer_ui", "ui_qml", intentList({"share.text"}));   // installed, no web
+    r.rebuild({LoadedPackage{"sharer_ui", "", "", sharer, ""}});
+    LOGOS_ASSERT_TRUE(r.installableFor("x_ui", "share.text").empty());
+    LOGOS_ASSERT_FALSE(r.declaresUse("basecamp_link", "share.text"));
+
+    r.rebuild({});
+    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(1));
+    LOGOS_ASSERT_TRUE(r.declaresUse("basecamp_link", "share.text"));
+}
+
 LOGOS_TEST(restricted_intents_admit_only_their_requesters)
 {
     IntentRegistry r;
-    r.restrictIntentToRequesters("pkg.remove", {"pm_ui"});
-    r.restrictIntentToRequesters("pkg.other", {});
+    r.setRestrictions({{"pkg.remove", {"pm_ui"}}, {"pkg.other", {}}});
     LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.remove", "pm_ui"));
     LOGOS_ASSERT_FALSE(r.requesterAllowed("pkg.remove", "wallet_ui"));
     LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.other", "anyone"));   // the empty list was refused
+
+    // The next set replaces this one.
+    r.setRestrictions({{"pkg.other", {"pm_ui"}}});
+    LOGOS_ASSERT_TRUE(r.requesterAllowed("pkg.remove", "wallet_ui"));
+    LOGOS_ASSERT_FALSE(r.requesterAllowed("pkg.other", "wallet_ui"));
 }
 
 LOGOS_TEST(rebuild_reads_disk_and_checks_the_name)

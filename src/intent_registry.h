@@ -97,6 +97,9 @@ public:
     // described", never "takes nothing".
     const std::vector<ParamSpec>& paramsSpecFor(const std::string& provider,
                                                 const std::string& intent) const;
+    // The same for what an answer carries: `result`, in the syntax of `params`.
+    const std::vector<ParamSpec>& resultSpecFor(const std::string& provider,
+                                                const std::string& intent) const;
     bool isHandoff(const std::string& provider, const std::string& intent) const;
 
     // "core", "ui_qml" or "shell"; empty for an unknown name.
@@ -134,6 +137,7 @@ private:
     struct Provide {
         std::string intent;
         std::vector<ParamSpec> params;
+        std::vector<ParamSpec> result;
         bool handoff = false;
         bool web = false;
     };
@@ -152,6 +156,7 @@ private:
     std::map<std::string, ProviderEntry> m_entries;
     std::map<std::string, std::string> m_types;
     std::map<std::string, std::vector<ParamSpec>> m_paramsSpec;   // "name/intent"
+    std::map<std::string, std::vector<ParamSpec>> m_resultSpec;   // "name/intent"
     std::set<std::string> m_handoff;                               // "name/intent"
     std::set<std::string> m_webReachable;                          // "name/intent"
     std::map<std::string, int> m_webIntents;                       // intent -> web-reachable entries

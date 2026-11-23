@@ -156,3 +156,24 @@ LOGOS_TEST(an_envelope_carries_data_or_an_error_never_both)
     LOGOS_ASSERT_TRUE(bad["data"].is_null());
     LOGOS_ASSERT_EQ(bad["error"].get<std::string>(), err::failed);
 }
+
+// Parsed text gives large positive numbers as unsigned, not the signed type a literal has.
+LOGOS_TEST(a_parsed_unsafe_integer_is_refused)
+{
+    LOGOS_ASSERT_TRUE(isCanonicalValue(json::parse("9007199254740991")));
+    LOGOS_ASSERT_FALSE(isCanonicalValue(json::parse("9007199254740992")));
+    LOGOS_ASSERT_FALSE(isCanonicalValue(json::parse("18446744073709551615")));
+}
+
+LOGOS_TEST(text_outside_the_basic_plane_survives_display_and_logs)
+{
+    const std::string emoji = "ok \xF0\x9F\x91\x8D";
+    LOGOS_ASSERT_EQ(displaySafe(emoji), emoji);
+    LOGOS_ASSERT_EQ(forLog(emoji), emoji);
+}
+
+LOGOS_TEST(invalid_utf8_is_escaped_in_logs)
+{
+    LOGOS_ASSERT_EQ(forLog(std::string("a\xFF" "b")), std::string("a\\xFFb"));
+    LOGOS_ASSERT_EQ(forLog(std::string("\xC0\xAF")), std::string("\\xC0\\xAF"));   // overlong '/'
+}

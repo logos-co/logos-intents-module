@@ -31,7 +31,7 @@ of name. Neither is a `logosctl` user before the host has claimed.
 
 | Rule | Where | Test |
 |---|---|---|
-| In Basecamp, a request with no click waits in the pending list before anything is resolved, so asking reveals nothing about what is installed | `IntentBroker::start` | `unclicked_requests_reveal_nothing_about_what_is_installed`, `unclicked_requests_wait_alike_whatever_is_installed` |
+| With an `interactive` presenter (Basecamp, once its Activity view shows the pending list), a request with no click waits in that list before anything is resolved, so asking reveals nothing about what is installed | `IntentBroker::start` | `unclicked_requests_reveal_nothing_about_what_is_installed`, `unclicked_requests_wait_alike_whatever_is_installed` |
 | Install offers only for clicked or opened requests, once per intent a minute | `offerInstall` | `install_offers_need_a_click`, `an_install_offer_needs_a_click_and_comes_once_a_minute` |
 | Install offers follow what is installed: the catalogue is kept, and the offers (links' web intents among them) are worked out again on every `set_installed` and `declare_shell` | `IntentRegistry::recomputeInstallable` | `install_offers_follow_what_is_installed` |
 | `unavailable` for absent, denied, unreachable and unloaded alike, never before 400 ms (15) | `failWithFloor` | `nothing_provides_it_is_unavailable_but_only_after_the_floor` |
@@ -56,6 +56,7 @@ of name. Neither is a `logosctl` user before the host has claimed.
 | Presenter input is read with checked reads, and an answer changes nothing unless it is valid; any exception that still escapes becomes a refusal | `answer`, `claim`, `guarded` | `a_malformed_presenter_answer_changes_nothing`, `a_shell_answer_with_a_null_error_completes`, `a_claim_with_a_non_string_option_is_refused` |
 | Every log line is one line: untrusted text is escaped and truncated, payloads are never logged (8) | `forLog` | `log_fields_stay_on_one_line`, `an_intent_name_cannot_forge_log_lines`, `metadata_cannot_forge_log_lines` |
 | At unload, provider clients are destroyed while the service is alive, which waits out any running delivery callback; after that no client is made and a delivery fails as `unavailable` | `ClientPool`, `IntentsModuleState::stop` | `closing_destroys_every_client_before_it_returns`, `no_client_is_made_after_the_pool_closes`, `a_callback_finishing_during_close_gets_no_client` |
+| A provider's answer must fit the `result` it declared (required fields, declared types; others pass), or the requester gets `failed` | `IntentBroker::resultViolation` | `an_answer_that_misses_its_declared_result_is_failed`, `a_provides_entry_describes_its_result_like_its_params` |
 | A provider can't mint `not_declared` / `unavailable` | `normalizeError` | `a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload` |
 
 ## Left to the host

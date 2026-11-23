@@ -108,6 +108,7 @@ void IntentRegistry::dropPackage(const std::string& name)
         for (const std::string& intent : p->second) {
             const std::string k = key(name, intent);
             m_paramsSpec.erase(k);
+            m_resultSpec.erase(k);
             m_handoff.erase(k);
             if (m_webReachable.erase(k) && --m_webIntents[intent] <= 0) m_webIntents.erase(intent);
         }
@@ -170,6 +171,7 @@ void IntentRegistry::declareShell(const std::string& shellName,
             diagnose(name + ": refused to provide reserved intent '" + *it + "'");
             const std::string k = key(name, *it);
             m_paramsSpec.erase(k);
+            m_resultSpec.erase(k);
             m_handoff.erase(k);
             if (m_webReachable.erase(k) && --m_webIntents[*it] <= 0) m_webIntents.erase(*it);
             it = intentSet.erase(it);
@@ -185,6 +187,7 @@ void IntentRegistry::resetPackages()
     m_entries.clear();
     m_types.clear();
     m_paramsSpec.clear();
+    m_resultSpec.clear();
     m_handoff.clear();
     m_webReachable.clear();
     m_webIntents.clear();
@@ -281,19 +284,24 @@ std::vector<IntentRegistry::Provide> IntentRegistry::parseProvides(const json* r
             diagnose(name + ": 'provides' declares '" + p.intent + "' twice — ignored");
             continue;
         }
-        if (const json* params = findKey(entry, "params"); params && params->is_array()) {
+        // `params` describes the request, `result` the answer; the same syntax.
+        const auto describe = [&](const char* field, std::vector<ParamSpec>& out) {
+            const json* specs = findKey(entry, field);
+            if (!specs || !specs->is_array()) return;
             std::size_t k = 0;
-            for (const json& spec : *params) {
+            for (const json& spec : *specs) {
                 if (++k > kMaxParams) {
-                    diagnose(name + ": '" + p.intent + "' describes more than 32 params — the rest are ignored");
+                    diagnose(name + ": '" + p.intent + "' has more than 32 entries in '" + field
+                             + "' — the rest are ignored");
                     break;
                 }
-                const std::string paramName = stringAt(spec, "name");
-                if (paramName.empty()) continue;
-                p.params.push_back({paramName, stringAt(spec, "type"),
-                                    boolAt(spec, "required").value_or(false)});
+                const std::string fieldName = stringAt(spec, "name");
+                if (fieldName.empty()) continue;
+                out.push_back({fieldName, stringAt(spec, "type"), boolAt(spec, "required").value_or(false)});
             }
-        }
+        };
+        describe("params", p.params);
+        describe("result", p.result);
         // Strict booleans: "true" as a string would otherwise flip the meaning.
         if (const json* h = findKey(entry, "handoff")) {
             if (h->is_boolean()) p.handoff = h->get<bool>();
@@ -353,6 +361,7 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
         m_provides[name].insert(p.intent);
         const std::string k = key(name, p.intent);
         if (!p.params.empty()) m_paramsSpec[k] = std::move(p.params);
+        if (!p.result.empty()) m_resultSpec[k] = std::move(p.result);
         if (p.handoff) m_handoff.insert(k);
         if (p.web && m_webReachable.insert(k).second) ++m_webIntents[p.intent];
     }
@@ -414,6 +423,14 @@ const std::vector<IntentRegistry::ParamSpec>& IntentRegistry::paramsSpecFor(
     static const std::vector<ParamSpec> none;
     const auto it = m_paramsSpec.find(key(provider, intent));
     return it == m_paramsSpec.end() ? none : it->second;
+}
+
+const std::vector<IntentRegistry::ParamSpec>& IntentRegistry::resultSpecFor(
+    const std::string& provider, const std::string& intent) const
+{
+    static const std::vector<ParamSpec> none;
+    const auto it = m_resultSpec.find(key(provider, intent));
+    return it == m_resultSpec.end() ? none : it->second;
 }
 
 bool IntentRegistry::isHandoff(const std::string& provider, const std::string& intent) const

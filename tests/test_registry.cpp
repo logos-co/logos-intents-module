@@ -155,6 +155,23 @@ LOGOS_TEST(install_offers_follow_what_is_installed)
     LOGOS_ASSERT_TRUE(r.declaresUse("basecamp_link", "share.text"));
 }
 
+LOGOS_TEST(a_provides_entry_describes_its_result_like_its_params)
+{
+    IntentRegistry r;
+    r.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
+        {"intent", "stamp.make"},
+        {"result", json::array({json{{"name", "stamp"}, {"type", "string"}, {"required", true}},
+                                json{{"type", "number"}}})},
+    }})), "", "");
+    const auto& spec = r.resultSpecFor("stamp_module", "stamp.make");
+    LOGOS_ASSERT_EQ(spec.size(), std::size_t(1));   // a field with no name is skipped
+    LOGOS_ASSERT_EQ(spec[0].name, std::string("stamp"));
+    LOGOS_ASSERT_EQ(spec[0].type, std::string("string"));
+    LOGOS_ASSERT_TRUE(spec[0].required);
+    LOGOS_ASSERT_TRUE(r.paramsSpecFor("stamp_module", "stamp.make").empty());
+    LOGOS_ASSERT_TRUE(r.resultSpecFor("stamp_module", "other.intent").empty());
+}
+
 LOGOS_TEST(restricted_intents_admit_only_their_requesters)
 {
     IntentRegistry r;
@@ -253,4 +270,100 @@ LOGOS_TEST(an_oversized_or_deeply_nested_manifest_is_refused_whole)
     LOGOS_ASSERT_EQ(r.typeOf("big_ui"), std::string());
     LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "deep_ui: metadata.json is malformed, too deeply nested or too large"));
     LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "big_ui: metadata.json is larger than 1 MiB"));
+}
+
+// Names are identity: a package can't take one the shell or another package has.
+LOGOS_TEST(a_package_cannot_take_the_shells_name_or_another_packages)
+{
+    IntentRegistry r;
+    r.ingest("basecamp", pkg("basecamp", "core", intentList({"share.text"})), "", "");
+    LOGOS_ASSERT_TRUE(r.declaresProvide("basecamp", "share.text"));
+    r.declareShell("basecamp", "basecamp.", {}, {}, {}, "Basecamp", "");
+    LOGOS_ASSERT_FALSE(r.declaresProvide("basecamp", "share.text"));
+    LOGOS_ASSERT_TRUE(r.isShell("basecamp"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "the shell's name — the package is dropped"));
+
+    r.ingest("sharer_ui", pkg("sharer_ui", "ui_qml", intentList({"share.text"})), "", "");
+    r.ingest("sharer_ui", pkg("sharer_ui", "core", intentList({"share.text", "share.file"})), "", "");
+    LOGOS_ASSERT_EQ(r.typeOf("sharer_ui"), std::string("ui_qml"));
+    LOGOS_ASSERT_FALSE(r.declaresProvide("sharer_ui", "share.file"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "duplicate package name — first record wins"));
+}
+
+LOGOS_TEST(invalid_shell_and_link_names_are_not_registered)
+{
+    IntentRegistry r;
+    r.declareShell("Base Camp", "basecamp.", {}, {}, {}, "", "");
+    LOGOS_ASSERT_FALSE(r.isShell("Base Camp"));
+    LOGOS_ASSERT_TRUE(r.shellName().empty());
+    r.registerLinkRequester("bad/link", {});
+    LOGOS_ASSERT_FALSE(r.isLinkRequester("bad/link"));
+
+    r.declareShell("basecamp", "basecamp.", {"Bad"}, {"basecamp.settings.open", "nope"},
+                   {"basecamp.apps.launch"}, "", "");
+    r.registerLinkRequester("basecamp_link", {"Bad.web"});
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "shell: uses 'Bad'"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "shell: provides 'nope'"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "which the shell doesn't provide"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "link: web intent 'Bad.web'"));
+    LOGOS_ASSERT_FALSE(r.isHandoff("basecamp", "basecamp.apps.launch"));
+}
+
+// A malformed manifest loses only what is malformed, and says so.
+LOGOS_TEST(malformed_uses_and_provides_are_dropped_with_a_diagnostic)
+{
+    IntentRegistry r;
+    json notLists = pkg("a_module", "core");
+    notLists["uses"] = "share.text";
+    notLists["provides"] = json{{"intent", "share.text"}};
+    r.ingest("a_module", notLists, "", "");
+    LOGOS_ASSERT_FALSE(r.declaresUse("a_module", "share.text"));
+    LOGOS_ASSERT_FALSE(r.declaresProvide("a_module", "share.text"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "a_module: 'uses' is not a list"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "a_module: 'provides' is not a list"));
+
+    json uses = json::array({"share.text", json{{"intent", "share.file"}}, json{{"intent", "share.file"}},
+                             json{{"intent", "share.link"}, {"cardinality", "many"}}});
+    for (int i = 0; i < 64; ++i) uses.push_back(json{{"intent", "bulk.i" + std::to_string(i)}});
+    r.ingest("b_module", pkg("b_module", "core", json::array(), uses), "", "");
+    LOGOS_ASSERT_FALSE(r.declaresUse("b_module", "share.text"));
+    LOGOS_ASSERT_TRUE(r.declaresUse("b_module", "share.file"));
+    LOGOS_ASSERT_TRUE(r.declaresUse("b_module", "share.link"));   // as 'single'
+    LOGOS_ASSERT_TRUE(r.declaresUse("b_module", "bulk.i59"));
+    LOGOS_ASSERT_FALSE(r.declaresUse("b_module", "bulk.i60"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "'uses' entry must be an object"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "'uses' declares 'share.file' twice"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "unsupported cardinality"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "more than 64 'uses' entries"));
+
+    json params = json::array();
+    for (int i = 0; i < 40; ++i) params.push_back(json{{"name", "p" + std::to_string(i)}, {"type", "string"}});
+    r.ingest("c_module", pkg("c_module", "core", json::array({json{{"intent", "share.text"}, {"params", params}}})), "", "");
+    LOGOS_ASSERT_EQ(r.paramsSpecFor("c_module", "share.text").size(), std::size_t(32));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "more than 32 entries in 'params'"));
+}
+
+LOGOS_TEST(a_metadata_json_that_is_a_directory_is_refused)
+{
+    test::TempPackages dir;
+    const std::string d = dir.add("odd_ui", json::object());
+    std::remove((d + "/metadata.json").c_str());
+    std::system(("mkdir '" + d + "/metadata.json'").c_str());
+    const auto loaded = loadPackages({InstalledPackage{"odd_ui", d, "", ""}});
+    LOGOS_ASSERT_EQ(loaded.size(), std::size_t(1));
+    LOGOS_ASSERT_TRUE(loaded[0].metadata.is_discarded());
+    LOGOS_ASSERT_EQ(loaded[0].error, std::string("metadata.json is not a regular file"));
+}
+
+// A web page may be offered only what would be reachable from the web once installed.
+LOGOS_TEST(a_link_is_offered_only_web_reachable_installs)
+{
+    IntentRegistry r = withShell();
+    r.registerLinkRequester("basecamp_link", {});
+    r.setInstallable({{"local_ui", {"share.text"}}, {"web_ui", {"share.text"}}},
+                     {{"web_ui", {"share.text"}}});
+    LOGOS_ASSERT_EQ(r.installableFor("x_ui", "share.text").size(), std::size_t(2));
+    const auto forLink = r.installableFor("basecamp_link", "share.text");
+    LOGOS_ASSERT_EQ(forLink.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(forLink[0], std::string("web_ui"));
 }

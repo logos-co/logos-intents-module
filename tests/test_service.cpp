@@ -438,3 +438,40 @@ LOGOS_TEST(the_same_run_of_a_backend_registered_again_keeps_its_requests)
         LOGOS_ASSERT_EQ(r.value("error", std::string()), std::string("unknown_handle"));
     }
 }
+
+namespace {
+
+// wallet_ui asks, the person picks cli_signer, and the delivery is outstanding.
+Delivery delivered(Harness& h)
+{
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        h.service->request("signing.approve", "{}", "");
+    }
+    const json choose = workOfKind(h.work(), "choose")[0];
+    const CallCaller host = CallCaller::host();
+    h.service->answer(h.secret, choose["id"], R"({"action":"choose","provider":"cli_signer"})");
+    return h.deliveries.at(0);
+}
+
+} // namespace
+
+// A reply arrives as JSON text or already parsed; either way {"ok":true} takes it,
+// and a taken delivery waits for the person past the 20 s an untaken one gets.
+LOGOS_TEST(a_delivery_taken_with_a_parsed_reply_waits_past_the_response_deadline)
+{
+    Harness h("immediate");
+    delivered(h).done(true, json{{"ok", true}});
+    h.now += 20001;
+    h.service->tick();
+    LOGOS_ASSERT_TRUE(h.settled.empty());
+}
+
+LOGOS_TEST(a_delivery_not_taken_times_out_at_the_response_deadline)
+{
+    Harness h("immediate");
+    delivered(h).done(true, json{{"ok", false}});
+    h.now += 20001;
+    h.service->tick();
+    LOGOS_ASSERT_EQ(h.settled.size(), std::size_t(1));
+}

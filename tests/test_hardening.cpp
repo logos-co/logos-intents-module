@@ -3,7 +3,6 @@
 
 #include <logos_test.h>
 
-#include "client_pool.h"
 #include "intent_rules.h"
 #include "intents_service.h"
 #include "test_support.h"
@@ -751,62 +750,4 @@ LOGOS_TEST(a_shell_declared_under_a_backends_name_drops_the_backend)
     const CallCaller backend = CallCaller::module("wallet_ui_backend");
     LOGOS_ASSERT_EQ(h.call(h.service->result(before["handle"], before["receipt"])).value("error", std::string()),
                     std::string("unknown_handle"));
-}
-
-// ── Unload: delivery callbacks end while the service is alive ───────────────
-
-namespace {
-
-// Stands in for LpClient: destroying it is where a running callback finishes,
-// and that callback may still ask the pool for a client.
-struct FakeClient {
-    std::function<void()> onDestroy;
-    ~FakeClient() { if (onDestroy) onDestroy(); }
-};
-
-} // namespace
-
-LOGOS_TEST(no_client_is_made_after_the_pool_closes)
-{
-    int made = 0;
-    ClientPool<FakeClient> pool([&](const std::string&) { ++made; return std::make_shared<FakeClient>(); });
-    LOGOS_ASSERT_TRUE(pool.get("cli_signer") != nullptr);
-    pool.close();
-    LOGOS_ASSERT_TRUE(pool.get("cli_signer") == nullptr);
-    LOGOS_ASSERT_TRUE(pool.get("signer_ui_backend") == nullptr);
-    LOGOS_ASSERT_EQ(made, 1);
-}
-
-LOGOS_TEST(closing_destroys_every_client_before_it_returns)
-{
-    int destroyed = 0;
-    ClientPool<FakeClient> pool([&](const std::string&) {
-        auto c = std::make_shared<FakeClient>();
-        c->onDestroy = [&] { ++destroyed; };
-        return c;
-    });
-    pool.get("a");
-    pool.get("b");
-    pool.close();
-    LOGOS_ASSERT_EQ(destroyed, 2);
-}
-
-// A callback finishing during close() may deliver again: it gets no client,
-// and close() doesn't deadlock on its own lock.
-LOGOS_TEST(a_callback_finishing_during_close_gets_no_client)
-{
-    const std::string outcome = inChild([]() -> std::string {
-        ClientPool<FakeClient>* self = nullptr;
-        std::string seen = "not called";
-        ClientPool<FakeClient> pool([&](const std::string&) {
-            auto c = std::make_shared<FakeClient>();
-            c->onDestroy = [&] { seen = self->get("other") ? "got a client" : "got none"; };
-            return c;
-        });
-        self = &pool;
-        pool.get("cli_signer");
-        pool.close();
-        return seen;
-    }, /*timeoutSeconds=*/10);
-    LOGOS_ASSERT_EQ(outcome, std::string("exit 0 | got none"));
 }

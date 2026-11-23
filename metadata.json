@@ -8,6 +8,9 @@
   "category": "platform",
   "main": "intents_module_plugin",
   "dependencies": [],
+  "interface_dependencies": [
+    { "name": "intent_provider", "file": "contracts/intent_provider.lidl" }
+  ],
   "nix": {
     "packages": {
       "build": ["boost"],

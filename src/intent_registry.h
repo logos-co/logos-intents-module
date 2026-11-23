@@ -1,7 +1,7 @@
 #pragma once
 
-// Which installed package can do what, read from each package's own
-// metadata.json. Ported from logos-basecamp's IntentRegistry.
+// Which installed module can do what, read from each package's own
+// metadata.json.
 //
 // Rebuilt whole, never incrementally: a half-updated index is worse than a
 // slightly late one.

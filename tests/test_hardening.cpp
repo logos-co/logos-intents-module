@@ -44,8 +44,8 @@ const char* kBasecampShell = R"({
   "handoff": ["basecamp.repositories.manage", "basecamp.settings.open", "basecamp.apps.open",
               "basecamp.apps.launch", "basecamp.packages.open"],
   "displayName": "Logos",
-  "restricted": {"basecamp.packages.confirm_uninstall": ["package_manager_ui"],
-                 "basecamp.packages.confirm_upgrade": ["package_manager_ui"]},
+  "restricted": {"basecamp.packages.confirm_uninstall": ["package_manager_ui_backend"],
+                 "basecamp.packages.confirm_upgrade": ["package_manager_ui_backend"]},
   "link": {"name": "logos_link",
            "webIntents": ["basecamp.repositories.manage", "basecamp.settings.open", "basecamp.apps.open",
                           "basecamp.apps.launch", "basecamp.packages.open"]}
@@ -58,8 +58,11 @@ struct Basecamp {
     std::vector<std::string> settled;
     std::unique_ptr<IntentsService> service;
     std::string secret;
+    bool opensEverything;
 
-    explicit Basecamp(const std::string& attention, BrokerConfig config = {})
+    // A presenter that opens every request at once, as Basecamp does until its
+    // Activity view shows the pending list, or one that leaves them pending.
+    explicit Basecamp(bool opensEverything, BrokerConfig config = {}) : opensEverything(opensEverything)
     {
         IntentsService::Outbound out;
         out.deliver = [this](const std::string& module, const json& args,
@@ -71,29 +74,32 @@ struct Basecamp {
         service = std::make_unique<IntentsService>(std::move(out), [this]() { return now; },
                                                    test::counterIds(), config);
         const CallCaller host = CallCaller::host();
-        secret = json::parse(service->claim(json{{"attention", attention}}.dump())).value("secret", std::string());
+        secret = json::parse(service->claim()).value("secret", std::string());
         install(json::array());
         service->declareShell(secret, kBasecampShell);
-        service->backendRegistered(secret, "wallet_ui", "wallet_ui_backend");
-        service->backendRegistered(secret, "package_manager_ui", "package_manager_ui_backend");
     }
 
     void install(const json& extra, const std::string& without = "")
     {
         const CallCaller host = CallCaller::host();
         json packages = json::array({
-            json{{"name", "wallet_ui"}, {"installDir", dir.add("wallet_ui", pkg("wallet_ui", "ui_qml", json::array(),
-                                                                           intentList({"signing.approve"})))}},
-            json{{"name", "signer_ui"}, {"installDir", dir.add("signer_ui", pkg("signer_ui", "ui_qml",
-                                                                           intentList({"signing.approve"})))}},
+            json{{"name", "wallet_ui"}, {"installDir", dir.add("wallet_ui", pkg("wallet_ui", "ui_qml"))}},
+            json{{"name", "wallet_ui_backend"},
+                 {"installDir", dir.add("wallet_ui_backend", pkg("wallet_ui_backend", "core", json::array(),
+                                                                 intentList({"signing.approve"})))}},
+            json{{"name", "signer_ui_backend"},
+                 {"installDir", dir.add("signer_ui_backend", pkg("signer_ui_backend", "core",
+                                                                 intentList({"signing.approve"})))}},
             json{{"name", "cli_signer"}, {"installDir", dir.add("cli_signer", pkg("cli_signer", "core",
                                                                              intentList({"signing.approve"})))}},
             json{{"name", "chain_module"}, {"installDir", dir.add("chain_module", pkg("chain_module", "core", json::array(),
                                                                                  intentList({"signing.approve", "absent.thing"})))}},
-            json{{"name", "package_manager_ui"},
-                 {"installDir", dir.add("package_manager_ui", pkg("package_manager_ui", "ui_qml",
-                                                                  intentList({"packages.install", "packages.show"}),
-                                                                  intentList({"basecamp.packages.confirm_install"})))}},
+            json{{"name", "package_manager_ui"}, {"installDir", dir.add("package_manager_ui", pkg("package_manager_ui", "ui_qml"))}},
+            json{{"name", "package_manager_ui_backend"},
+                 {"installDir", dir.add("package_manager_ui_backend",
+                                        pkg("package_manager_ui_backend", "core",
+                                            intentList({"packages.install", "packages.show"}),
+                                            intentList({"basecamp.packages.confirm_install"})))}},
         });
         for (const json& e : extra) packages.push_back(e);
         if (!without.empty())
@@ -104,17 +110,31 @@ struct Basecamp {
     }
 
     json call(const std::string& s) { return json::parse(s); }
+    // The presenter's work; one that opens everything opens each pending request first.
     json work()
     {
         const CallCaller host = CallCaller::host();
-        return call(service->nextWork(secret)).value("items", json::array());
+        json out = json::array();
+        for (;;) {
+            const json items = call(service->nextWork(secret)).value("items", json::array());
+            bool opened = false;
+            for (const json& item : items) {
+                if (opensEverything && item.value("kind", "") == "pending") {
+                    service->answer(secret, item["id"], R"({"action":"open"})");
+                    opened = true;
+                } else {
+                    out.push_back(item);
+                }
+            }
+            if (!opened) return out;
+        }
     }
-    std::string clickToken(const std::string& app)
+    // The person opens what waits in the pending list; what that queues stays unpulled.
+    void openPending()
     {
         const CallCaller host = CallCaller::host();
-        const std::string token = "tok-" + app + "-" + std::to_string(now) + "-0123456789";
-        service->registerClickToken(secret, token, app, "");
-        return token;
+        for (const json& item : call(service->nextWork(secret)).value("items", json::array()))
+            if (item.value("kind", "") == "pending") service->answer(secret, item["id"], R"({"action":"open"})");
     }
     void advance(std::int64_t ms)
     {
@@ -193,13 +213,13 @@ long long msSince(std::chrono::steady_clock::time_point t0)
 
 LOGOS_TEST(a_module_named_like_the_link_requester_is_refused)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     json r;
     {
         const CallCaller impostor = CallCaller::module("logos_link");
-        r = h.call(h.service->request("basecamp.apps.launch", R"({"app":"wallet_ui"})", ""));
-        for (int i = 0; i < 16; ++i) h.service->request("basecamp.settings.open", "{}", "");
+        r = h.call(h.service->request("basecamp.apps.launch", R"({"app":"wallet_ui"})"));
+        for (int i = 0; i < 16; ++i) h.service->request("basecamp.settings.open", "{}");
     }
     LOGOS_ASSERT_FALSE(r["ok"].get<bool>());
     LOGOS_ASSERT_TRUE(h.work().empty());
@@ -217,12 +237,12 @@ LOGOS_TEST(a_module_named_like_the_link_requester_is_refused)
 
 LOGOS_TEST(a_module_named_like_the_shell_is_refused)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     json r;
     {
         const CallCaller impostor = CallCaller::module("main_ui");
-        r = h.call(h.service->request("packages.install", R"({"name":"evil_pkg"})", ""));
+        r = h.call(h.service->request("packages.install", R"({"name":"evil_pkg"})"));
     }
     LOGOS_ASSERT_FALSE(r["ok"].get<bool>());
     LOGOS_ASSERT_TRUE(h.deliveries.empty());
@@ -231,21 +251,23 @@ LOGOS_TEST(a_module_named_like_the_shell_is_refused)
 
 LOGOS_TEST(a_module_named_like_an_app_is_refused)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     json r;
-    {
+    // Refused for its name, not only for declaring nothing: a chooser could show it as the app.
+    const std::string log = capturedStderr([&]() {
         const CallCaller impostor = CallCaller::module("wallet_ui");   // not wallet_ui_backend
-        r = h.call(h.service->request("signing.approve", R"({"tx":"attacker-chosen"})", ""));
+        r = h.call(h.service->request("signing.approve", R"({"tx":"attacker-chosen"})"));
         LOGOS_ASSERT_EQ(h.call(h.service->result("id1", "id2"))["error"].get<std::string>(),
                         std::string("unknown_handle"));
-    }
+    });
+    LOGOS_ASSERT_TRUE(log.find("refused module wallet_ui") != std::string::npos);
     LOGOS_ASSERT_FALSE(r["ok"].get<bool>());
     LOGOS_ASSERT_TRUE(workOfKind(h.work(), "pending").empty());
 
     // The app itself, through its backend, is unaffected.
     const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    LOGOS_ASSERT_TRUE(h.call(h.service->request("signing.approve", "{}", ""))["ok"].get<bool>());
+    LOGOS_ASSERT_TRUE(h.call(h.service->request("signing.approve", "{}"))["ok"].get<bool>());
 }
 
 // ── H2: a package's metadata.json can't crash the module ─────────────────────
@@ -265,7 +287,7 @@ LOGOS_TEST(deeply_nested_metadata_cannot_crash_set_installed)
         }
         IntentsService s(IntentsService::Outbound{}, []() { return std::int64_t(0); }, test::counterIds());
         const CallCaller host = CallCaller::host();
-        const std::string secret = json::parse(s.claim(R"({"attention":"interactive"})"))["secret"].get<std::string>();
+        const std::string secret = json::parse(s.claim())["secret"].get<std::string>();
         return s.setInstalled(secret, json::array({json{{"name", "deep_ui"}, {"installDir", d}}}).dump());
     });
     LOGOS_ASSERT_TRUE(outcome.rfind("exit 0", 0) == 0);
@@ -290,37 +312,44 @@ LOGOS_TEST(a_deeply_nested_deliver_reply_cannot_crash_the_module)
         IntentsService s(std::move(out), [&now]() { return now; }, test::counterIds());
         test::TempPackages dir;
         const CallCaller host = CallCaller::host();
-        const std::string secret = json::parse(s.claim(R"({"attention":"immediate"})"))["secret"].get<std::string>();
+        const std::string secret = json::parse(s.claim())["secret"].get<std::string>();
         s.setInstalled(secret, json::array({
             json{{"name", "asker"}, {"installDir", dir.add("asker", pkg("asker", "core", json::array(), intentList({"x.y"})))}},
             json{{"name", "evil_provider"}, {"installDir", dir.add("evil", pkg("evil_provider", "core", intentList({"x.y"})))}},
         }).dump());
         {
             const CallCaller asker = CallCaller::module("asker");
-            s.request("x.y", "{}", "");
+            s.request("x.y", "{}");
         }
-        // The person picks evil_provider; delivering to it is where its replies arrive.
-        const json items = json::parse(s.nextWork(secret)).value("items", json::array());
-        for (const json& item : items)
-            if (item.value("kind", "") == "choose")
-                return s.answer(secret, item["id"], R"({"action":"choose","provider":"evil_provider"})");
-        return std::string("no chooser");
+        // The person opens it and picks evil_provider; delivering to it is where its replies arrive.
+        const auto first = [&](const char* kind) {
+            const json items = json::parse(s.nextWork(secret)).value("items", json::array());
+            for (const json& item : items)
+                if (item.value("kind", "") == kind) return item;
+            return json();
+        };
+        const json pending = first("pending");
+        if (pending.is_null()) return std::string("no pending request");
+        s.answer(secret, pending["id"], R"({"action":"open"})");
+        const json choose = first("choose");
+        if (choose.is_null()) return std::string("no chooser");
+        return s.answer(secret, choose["id"], R"({"action":"choose","provider":"evil_provider"})");
     });
     LOGOS_ASSERT_TRUE(outcome.rfind("exit 0", 0) == 0);
     LOGOS_ASSERT_TRUE(outcome.find("\"ok\":true") != std::string::npos);   // delivered, replies read
 }
 
-// ── M1, M2: nothing installed shows without a click, and offers don't stream ─
+// ── M1, M2: nothing installed shows before a request is opened, and offers don't stream ─
 
-LOGOS_TEST(unclicked_requests_reveal_nothing_about_what_is_installed)
+LOGOS_TEST(unopened_requests_reveal_nothing_about_what_is_installed)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     json present, absent;
     {
         const CallCaller probe = CallCaller::module("chain_module");
-        present = h.call(h.service->request("signing.approve", "{}", ""));
-        absent = h.call(h.service->request("absent.thing", "{}", ""));
+        present = h.call(h.service->request("signing.approve", "{}"));
+        absent = h.call(h.service->request("absent.thing", "{}"));
     }
     h.advance(500);
     const CallCaller probe = CallCaller::module("chain_module");
@@ -330,14 +359,14 @@ LOGOS_TEST(unclicked_requests_reveal_nothing_about_what_is_installed)
     LOGOS_ASSERT_EQ(b.value("state", ""), std::string("pending"));
 }
 
-LOGOS_TEST(install_offers_need_a_click)
+LOGOS_TEST(install_offers_need_an_opened_request)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     {
         const CallCaller attacker = CallCaller::module("chain_module");
         for (int i = 0; i < 50; ++i) {
-            const json t = h.call(h.service->request("absent.thing", "{}", ""));
+            const json t = h.call(h.service->request("absent.thing", "{}"));
             if (t["ok"].get<bool>()) h.service->cancel(t["handle"], t["receipt"]);
         }
     }
@@ -348,18 +377,18 @@ LOGOS_TEST(install_offers_need_a_click)
 
 LOGOS_TEST(withdrawn_requests_cannot_crowd_out_another_apps_chooser)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
-    const std::string token = h.clickToken("wallet_ui");
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", token);
+        h.service->request("signing.approve", "{}");
     }
+    h.openPending();   // the person opens Wallet's request
     int admitted = 0;
     {
         const CallCaller attacker = CallCaller::module("chain_module");
         for (int i = 0; i < 520; ++i) {
-            const json t = h.call(h.service->request("signing.approve", "{}", ""));
+            const json t = h.call(h.service->request("signing.approve", "{}"));
             if (!t["ok"].get<bool>()) continue;
             ++admitted;
             h.service->cancel(t["handle"], t["receipt"]);
@@ -376,10 +405,10 @@ LOGOS_TEST(withdrawn_requests_cannot_crowd_out_another_apps_chooser)
 
 LOGOS_TEST(a_response_from_a_stranger_reads_nothing)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/true);
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", "");
+        h.service->request("signing.approve", "{}");
     }
     const json choose = workOfKind(h.work(), "choose").at(0);
     {
@@ -402,11 +431,11 @@ LOGOS_TEST(a_response_from_a_stranger_reads_nothing)
 // provider gets the short response deadline, not the 10-minute one.
 LOGOS_TEST(an_oversized_deliver_reply_is_not_an_acceptance)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/true);
     json ticket;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        ticket = h.call(h.service->request("signing.approve", "{}", ""));
+        ticket = h.call(h.service->request("signing.approve", "{}"));
     }
     const json choose = workOfKind(h.work(), "choose").at(0);
     {
@@ -429,12 +458,12 @@ LOGOS_TEST(a_huge_manifest_is_refused_quickly)
     test::TempPackages dir;
     json provides = json::array();
     for (int i = 0; i < 44000; ++i) provides.push_back(json{{"intent", "x.a" + std::to_string(i)}});
-    const std::string d = dir.add("wide_ui", json{{"name", "wide_ui"}, {"type", "ui_qml"}, {"provides", provides}});
+    const std::string d = dir.add("wide_module", json{{"name", "wide_module"}, {"type", "core"}, {"provides", provides}});
     IntentsService s(IntentsService::Outbound{}, []() { return std::int64_t(0); }, test::counterIds());
     const CallCaller host = CallCaller::host();
-    const std::string secret = json::parse(s.claim(R"({"attention":"interactive"})"))["secret"].get<std::string>();
+    const std::string secret = json::parse(s.claim())["secret"].get<std::string>();
     const auto t0 = std::chrono::steady_clock::now();
-    s.setInstalled(secret, json::array({json{{"name", "wide_ui"}, {"installDir", d}}}).dump());
+    s.setInstalled(secret, json::array({json{{"name", "wide_module"}, {"installDir", d}}}).dump());
     LOGOS_ASSERT_LT(msSince(t0), 1000);
 }
 
@@ -442,14 +471,14 @@ LOGOS_TEST(a_huge_manifest_is_refused_quickly)
 // time quadratic in all the web opt-ins so far.
 LOGOS_TEST(web_opt_ins_do_not_slow_down_rebuilds)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     json extra = json::array();
     for (int p = 0; p < 120; ++p) {
         json provides = json::array();
         for (int i = 0; i < 64; ++i)
             provides.push_back(json{{"intent", "w" + std::to_string(p) + ".a" + std::to_string(i)}, {"web", true}});
-        const std::string n = "web" + std::to_string(p) + "_ui";
-        extra.push_back(json{{"name", n}, {"installDir", h.dir.add(n, json{{"name", n}, {"type", "ui_qml"},
+        const std::string n = "web" + std::to_string(p) + "_module";
+        extra.push_back(json{{"name", n}, {"installDir", h.dir.add(n, json{{"name", n}, {"type", "core"},
                                                                           {"provides", provides}})}});
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -461,7 +490,7 @@ LOGOS_TEST(web_opt_ins_do_not_slow_down_rebuilds)
 
 LOGOS_TEST(an_oversized_result_is_refused)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.install(json::array({json{{"name", "hog_module"},
                                 {"installDir", h.dir.add("hog_module", pkg("hog_module", "core",
                                                                            intentList({"hog.store"}),
@@ -473,7 +502,7 @@ LOGOS_TEST(an_oversized_result_is_refused)
     for (int n = 0; n < 4; ++n) {
         {
             const CallCaller hog = CallCaller::module("hog_module");
-            h.service->request("hog.store", "{}", "");
+            h.service->request("hog.store", "{}");
         }
         const std::string dispatch = h.deliveries.back().args[0].get<std::string>();
         const CallCaller hog = CallCaller::module("hog_module");
@@ -484,7 +513,7 @@ LOGOS_TEST(an_oversized_result_is_refused)
 
 LOGOS_TEST(the_work_queue_does_not_keep_withdrawn_payloads)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/false);
     h.install(json::array({json{{"name", "shellish_module"},
                                 {"installDir", h.dir.add("shellish_module", pkg("shellish_module", "core", json::array(),
                                                                                 intentList({"basecamp.settings.open"})))}}}));
@@ -492,12 +521,16 @@ LOGOS_TEST(the_work_queue_does_not_keep_withdrawn_payloads)
     std::string params = "{";
     for (int i = 0; i < 13; ++i) params += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":\"" + std::string(65536, 'a') + "\"";
     params += "}";
-    {
-        const CallCaller m = CallCaller::module("shellish_module");
-        for (int i = 0; i < 4; ++i) {
-            const json t = h.call(h.service->request("basecamp.settings.open", params, ""));
-            if (t["ok"].get<bool>()) h.service->cancel(t["handle"], t["receipt"]);
+    for (int i = 0; i < 4; ++i) {
+        json t;
+        {
+            const CallCaller m = CallCaller::module("shellish_module");
+            t = h.call(h.service->request("basecamp.settings.open", params));
         }
+        h.openPending();   // queues the shell's `deliver`, params and all, unpulled
+        if (!t["ok"].get<bool>()) continue;
+        const CallCaller m = CallCaller::module("shellish_module");
+        h.service->cancel(t["handle"], t["receipt"]);
     }
     const CallCaller host = CallCaller::host();
     LOGOS_ASSERT_LT(h.service->nextWork(h.secret).size(), std::size_t(64 * 1024));
@@ -507,20 +540,20 @@ LOGOS_TEST(the_work_queue_does_not_keep_withdrawn_payloads)
 
 LOGOS_TEST(undeclared_requests_raise_no_events)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.settled.clear();
     const CallCaller spam = CallCaller::module("spam_module");
-    for (int i = 0; i < 20000; ++i) h.service->request("x.y", "{}", "");
+    for (int i = 0; i < 20000; ++i) h.service->request("x.y", "{}");
     LOGOS_ASSERT_TRUE(h.settled.empty());
 }
 
 LOGOS_TEST(requests_past_the_rate_are_refused_in_the_reply)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/true);
     int admitted = 0;
     const CallCaller m = CallCaller::module("chain_module");
     for (int i = 0; i < 5000; ++i)
-        if (h.call(h.service->request("absent.thing", "{}", ""))["ok"].get<bool>()) ++admitted;
+        if (h.call(h.service->request("absent.thing", "{}"))["ok"].get<bool>()) ++admitted;
     LOGOS_ASSERT_EQ(admitted, 20);
 }
 
@@ -528,24 +561,24 @@ LOGOS_TEST(requests_past_the_rate_are_refused_in_the_reply)
 // and one that can't be read changes nothing.
 LOGOS_TEST(a_shell_declaration_replaces_its_restrictions_whole)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/true);
     h.install(json::array({json{{"name", "cleanup_module"},
                                 {"installDir", h.dir.add("cleanup_module",
                                                          pkg("cleanup_module", "core", json::array(),
                                                              intentList({"basecamp.packages.confirm_uninstall"})))}}}));
     const auto ask = [&]() {
         const CallCaller m = CallCaller::module("cleanup_module");
-        h.service->request("basecamp.packages.confirm_uninstall", "{}", "");
+        h.service->request("basecamp.packages.confirm_uninstall", "{}");
     };
     const auto declare = [&](const json& shell) {
         const CallCaller host = CallCaller::host();
         return h.call(h.service->declareShell(h.secret, shell.dump()))["ok"].get<bool>();
     };
     ask();
-    LOGOS_ASSERT_TRUE(workOfKind(h.work(), "deliver").empty());   // only package_manager_ui may
+    LOGOS_ASSERT_TRUE(workOfKind(h.work(), "deliver").empty());   // only package_manager_ui_backend may
 
     json shell = json::parse(kBasecampShell);
-    shell["restricted"] = json{{"basecamp.packages.confirm_upgrade", {"package_manager_ui"}}};
+    shell["restricted"] = json{{"basecamp.packages.confirm_upgrade", {"package_manager_ui_backend"}}};
     LOGOS_ASSERT_TRUE(declare(shell));
     ask();
     LOGOS_ASSERT_EQ(workOfKind(h.work(), "deliver").size(), std::size_t(1));
@@ -563,7 +596,7 @@ LOGOS_TEST(a_shell_declaration_replaces_its_restrictions_whole)
 // Each of the presenter's own requests ends as a work item, so they have a rate too.
 LOGOS_TEST(the_presenters_own_requests_have_a_rate_too)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     int admitted = 0;
     const CallCaller host = CallCaller::host();
     for (int i = 0; i < 100; ++i)
@@ -575,14 +608,15 @@ LOGOS_TEST(settled_is_never_sent_before_the_request_returns)
 {
     BrokerConfig instant;
     instant.errorFloorMs = 0;   // a refusal that would settle inside the call
-    Basecamp h("immediate", instant);
+    Basecamp h(/*opensEverything=*/true, instant);
     h.settled.clear();
     json t;
     {
         const CallCaller m = CallCaller::module("chain_module");
-        t = h.call(h.service->request("absent.thing", "{}", ""));
+        t = h.call(h.service->request("absent.thing", "{}"));
     }
     LOGOS_ASSERT_TRUE(h.settled.empty());
+    h.work();   // opened: nothing provides it
     h.advance(100);
     LOGOS_ASSERT_EQ(h.settled.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(h.settled[0], t["handle"].get<std::string>());
@@ -592,24 +626,24 @@ LOGOS_TEST(settled_is_never_sent_before_the_request_returns)
 
 LOGOS_TEST(an_intent_name_cannot_forge_log_lines)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     const std::string log = capturedStderr([&]() {
         const CallCaller m = CallCaller::module("chain_module");
         h.service->request("x\n[intents_module] dropped a response from cli_signer: not waiting for it\n",
-                           "not json", "");
-        h.service->request("signing.approve", "not json", "");
+                           "not json");
+        h.service->request("signing.approve", "not json");
     });
     LOGOS_ASSERT_TRUE(log.find("\n[intents_module] dropped a response") == std::string::npos);
 }
 
 LOGOS_TEST(metadata_cannot_forge_log_lines)
 {
-    Basecamp h("interactive");
-    const json meta = json{{"name", "liar_ui"}, {"type", "ui_qml"},
+    Basecamp h(/*opensEverything=*/false);
+    const json meta = json{{"name", "liar_module"}, {"type", "core"},
                            {"provides", json::array({json{{"intent", "X\n[intents_module] presenter claimed (immediate)"}}})},
                            {"uses", json::array({json{{"intent", "y\r\n[intents_module] refused claim"}}})}};
     const std::string log = capturedStderr([&]() {
-        h.install(json::array({json{{"name", "liar_ui"}, {"installDir", h.dir.add("liar_ui", meta)}}}));
+        h.install(json::array({json{{"name", "liar_module"}, {"installDir", h.dir.add("liar_module", meta)}}}));
     });
     LOGOS_ASSERT_TRUE(log.find("\n[intents_module] presenter claimed") == std::string::npos);
     LOGOS_ASSERT_TRUE(log.find("\n[intents_module] refused claim") == std::string::npos);
@@ -617,18 +651,9 @@ LOGOS_TEST(metadata_cannot_forge_log_lines)
 
 // ── L4: bad presenter input is refused, not thrown ──────────────────────────
 
-LOGOS_TEST(a_claim_with_a_non_string_option_is_refused)
-{
-    IntentsService s(IntentsService::Outbound{}, []() { return std::int64_t(0); }, test::counterIds());
-    const CallCaller host = CallCaller::host();
-    LOGOS_ASSERT_FALSE(json::parse(s.claim(R"({"attention":5})"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(json::parse(s.claim(R"([1,2])"))["ok"].get<bool>());
-    LOGOS_ASSERT_TRUE(json::parse(s.claim(R"({"attention":"immediate"})"))["ok"].get<bool>());
-}
-
 LOGOS_TEST(a_shell_answer_with_a_null_error_completes)
 {
-    Basecamp h("interactive");
+    Basecamp h(/*opensEverything=*/false);
     h.work();
     std::string handle;
     {
@@ -651,17 +676,17 @@ LOGOS_TEST(a_shell_answer_with_a_null_error_completes)
 
 LOGOS_TEST(a_queued_choice_gets_its_full_time_once_shown)
 {
-    Basecamp h("immediate");
+    Basecamp h(/*opensEverything=*/true);
     h.work();
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", "");
+        h.service->request("signing.approve", "{}");
     }
     h.now += 1;
     json second;
     {
         const CallCaller m = CallCaller::module("chain_module");
-        second = h.call(h.service->request("signing.approve", "{}", ""));
+        second = h.call(h.service->request("signing.approve", "{}"));
     }
     const auto first = workOfKind(h.work(), "choose");
     LOGOS_ASSERT_EQ(first.size(), std::size_t(1));
@@ -690,7 +715,7 @@ LOGOS_TEST(a_fifo_manifest_cannot_stall_set_installed)
         if (mkfifo((d + "/metadata.json").c_str(), 0600) != 0) return "mkfifo failed";
         IntentsService s(IntentsService::Outbound{}, []() { return std::int64_t(0); }, test::counterIds());
         const CallCaller host = CallCaller::host();
-        const std::string secret = json::parse(s.claim(R"({"attention":"interactive"})"))["secret"].get<std::string>();
+        const std::string secret = json::parse(s.claim())["secret"].get<std::string>();
         return s.setInstalled(secret, json::array({
             json{{"name", "fifo_ui"}, {"installDir", d}},
             json{{"name", "fine_ui"}, {"installDir", dir.add("fine_ui", pkg("fine_ui", "ui_qml"))}},
@@ -698,60 +723,4 @@ LOGOS_TEST(a_fifo_manifest_cannot_stall_set_installed)
     }, /*timeoutSeconds=*/10);
     LOGOS_ASSERT_TRUE(outcome.rfind("exit 0", 0) == 0);
     LOGOS_ASSERT_TRUE(outcome.find("not a regular file") != std::string::npos);
-}
-
-// A backend registration is checked again whenever the installed set changes:
-// a package installed later under the backend's name is that package, not the app.
-LOGOS_TEST(a_package_installed_under_a_backends_name_is_not_the_app)
-{
-    Basecamp h("immediate");
-    json before;
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        before = h.call(h.service->request("signing.approve", "{}", ""));
-    }
-    h.work();
-    h.install(json::array({json{{"name", "wallet_ui_backend"},
-                                {"installDir", h.dir.add("squatter", pkg("wallet_ui_backend", "core", json::array(),
-                                                                         intentList({"signing.approve"})))}}}));
-    {
-        const CallCaller squatter = CallCaller::module("wallet_ui_backend");
-        // The app's open request went with its backend.
-        LOGOS_ASSERT_EQ(h.call(h.service->result(before["handle"], before["receipt"])).value("error", std::string()),
-                        std::string("unknown_handle"));
-        h.service->request("signing.approve", "{}", "");
-    }
-    const json choose = workOfKind(h.work(), "choose").at(0);
-    LOGOS_ASSERT_EQ(choose["requester"].get<std::string>(), std::string("wallet_ui_backend"));
-}
-
-LOGOS_TEST(an_uninstalled_apps_backend_is_dropped)
-{
-    Basecamp h("immediate");
-    json before;
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        before = h.call(h.service->request("signing.approve", "{}", ""));
-    }
-    h.install(json::array(), /*without=*/"wallet_ui");
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    LOGOS_ASSERT_EQ(h.call(h.service->result(before["handle"], before["receipt"])).value("error", std::string()),
-                    std::string("unknown_handle"));
-}
-
-LOGOS_TEST(a_shell_declared_under_a_backends_name_drops_the_backend)
-{
-    Basecamp h("immediate");
-    json before;
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        before = h.call(h.service->request("signing.approve", "{}", ""));
-    }
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->declareShell(h.secret, R"({"name":"wallet_ui_backend"})");
-    }
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    LOGOS_ASSERT_EQ(h.call(h.service->result(before["handle"], before["receipt"])).value("error", std::string()),
-                    std::string("unknown_handle"));
 }

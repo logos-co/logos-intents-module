@@ -65,16 +65,14 @@ void IntentsService::logRefusal(const std::string& caller, const std::string& li
     logLine(line);
 }
 
-IntentsService::Requester IntentsService::requesterForCaller()
+std::string IntentsService::requesterForCaller()
 {
     const logos::LogosCaller caller = logos::currentCaller();
     // Host is refused here on purpose: under the daemon every `logosctl call`
     // is Host. The shell asks through shellRequest(), with the secret.
     if (!caller.isModule() || caller.name.empty()) return {};
-    const std::string app = m_broker.appForBackend(caller.name);
-    if (!app.empty()) return {app, true};
     // These names are identities a module can't have: the shell and links ask
-    // only through the presenter, and an app only through its registered backend.
+    // only through the presenter, and an app only through its backend module.
     if (m_registry.isShell(caller.name) || m_registry.isLinkRequester(caller.name)
         || m_registry.typeOf(caller.name) == "ui_qml") {
         logRefusal(caller.name, "refused module " + caller.name
@@ -82,7 +80,7 @@ IntentsService::Requester IntentsService::requesterForCaller()
                    m_clock());
         return {};
     }
-    return {caller.name, false};
+    return caller.name;
 }
 
 bool IntentsService::presenterCall(const std::string& secret, const char* method)
@@ -96,24 +94,6 @@ bool IntentsService::presenterCall(const std::string& secret, const char* method
         logRefusal("presenter", std::string("refused ") + method + ": wrong presenter secret", m_clock());
         return false;
     }
-    return true;
-}
-
-bool IntentsService::consumeClickToken(const Requester& who, const std::string& token,
-                                       const std::string& intent, std::int64_t now)
-{
-    // A token proves a click in an app's view, so only that app's registered
-    // backend may spend it. A module merely named like a backend has no app.
-    if (token.empty() || !who.viaBackend) return false;
-    const auto it = m_clickTokens.find(who.name);
-    if (it == m_clickTokens.end()) return false;
-    if (!sameSecret(token, it->second.token)) return false;
-    if (now > it->second.expires) {
-        m_clickTokens.erase(it);
-        return false;
-    }
-    if (!it->second.intent.empty() && it->second.intent != intent) return false;
-    m_clickTokens.erase(it);   // single use
     return true;
 }
 
@@ -159,26 +139,23 @@ void IntentsService::run(std::vector<Effect> effects)
 
 // ── Requesters ───────────────────────────────────────────────────────────────
 
-std::string IntentsService::request(const std::string& intent, const std::string& paramsJson,
-                                    const std::string& clickToken)
+std::string IntentsService::request(const std::string& intent, const std::string& paramsJson)
 {
     std::vector<Effect> effects;
     json out;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const Requester who = requesterForCaller();
+        const std::string who = requesterForCaller();
         // Answered here, with no handle and no event: a fact about the caller's
         // own manifest, and an event per call would let one module flood every other.
-        if (who.name.empty() || !isValidName(intent) || !m_registry.declaresUse(who.name, intent))
+        if (who.empty() || !isValidName(intent) || !m_registry.declaresUse(who, intent))
             return refusal(err::notDeclared);
         const std::int64_t now = m_clock();
-        if (!m_broker.admit(who.name, now)) return refusal(err::failed);
+        if (!m_broker.admit(who, now)) return refusal(err::failed);
 
         // Only now, for a declared request within its rate, is anything it sent read.
         const json params = paramsJson.empty() ? json::object() : parseBounded(paramsJson, kPayloadLimits);
-        const bool clicked = consumeClickToken(who, clickToken, intent, now);
-        const IntentBroker::Ticket t = m_broker.submit(who.name, intent, params, clicked,
-                                                       /*fromPresenter=*/false, now);
+        const IntentBroker::Ticket t = m_broker.submit(who, intent, params, /*fromPresenter=*/false, now);
         // A `settled` for this request waits for the next tick, so it can't reach
         // the requester before the handle it names.
         for (Effect& e : m_broker.takeEffects()) {
@@ -194,9 +171,9 @@ std::string IntentsService::request(const std::string& intent, const std::string
 std::string IntentsService::result(const std::string& handle, const std::string& receipt)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const Requester who = requesterForCaller();
-    if (who.name.empty()) return refusal("unknown_handle");
-    return m_broker.result(who.name, handle, receipt).dump();
+    const std::string who = requesterForCaller();
+    if (who.empty()) return refusal("unknown_handle");
+    return m_broker.result(who, handle, receipt).dump();
 }
 
 std::string IntentsService::cancel(const std::string& handle, const std::string& receipt)
@@ -205,9 +182,9 @@ std::string IntentsService::cancel(const std::string& handle, const std::string&
     bool ok = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const Requester who = requesterForCaller();
-        if (who.name.empty()) return reply(false);
-        ok = m_broker.cancel(who.name, handle, receipt, m_clock());
+        const std::string who = requesterForCaller();
+        if (who.empty()) return reply(false);
+        ok = m_broker.cancel(who, handle, receipt, m_clock());
         effects = m_broker.takeEffects();
     }
     run(std::move(effects));
@@ -243,7 +220,7 @@ std::string IntentsService::respond(const std::string& dispatchId, bool ok,
 
 // ── Presenter ────────────────────────────────────────────────────────────────
 
-std::string IntentsService::claim(const std::string& optionsJson)
+std::string IntentsService::claim()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     // Once, by the host, before any app and before the daemon takes logosctl
@@ -256,18 +233,10 @@ std::string IntentsService::claim(const std::string& optionsJson)
         logLine("refused claim: the presenter role is already taken");
         return refusal("refused");
     }
-    const json options = optionsJson.empty() ? json::object() : parseBounded(optionsJson, kPresenterLimits);
-    if (!options.is_object()) return refusal("bad_options");
-    const json* given = findKey(options, "attention");
-    const std::string attention = given ? (given->is_string() ? given->get<std::string>() : std::string())
-                                        : std::string("interactive");
-    if (attention == "interactive") m_broker.setAttention(Attention::Interactive);
-    else if (attention == "immediate") m_broker.setAttention(Attention::Immediate);
-    else return refusal("bad_options");
-
     m_secret = m_mintId() + m_mintId();
     m_claimed = true;
-    logLine("presenter claimed (" + attention + ")");
+    m_broker.setClaimed();
+    logLine("presenter claimed");
     return json{{"ok", true}, {"secret", m_secret}}.dump();
 }
 
@@ -293,51 +262,6 @@ std::string IntentsService::answer(const std::string& secret, const std::string&
     return reply(ok);
 }
 
-std::string IntentsService::registerClickToken(const std::string& secret, const std::string& token,
-                                               const std::string& app, const std::string& intent)
-{
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!presenterCall(secret, "register_click_token")) return refusal("refused");
-    if (token.size() < 16 || token.size() > 256 || m_registry.typeOf(app) != "ui_qml"
-        || (!intent.empty() && !isValidName(intent)))
-        return reply(false);
-    // One live token per app: a new click replaces the last one.
-    m_clickTokens[app] = ClickToken{token, intent, m_clock() + kClickTokenMs};
-    return reply(true);
-}
-
-std::string IntentsService::backendRegistered(const std::string& secret, const std::string& app,
-                                              const std::string& module, const std::string& instance)
-{
-    std::vector<Effect> effects;
-    bool ok = false;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!presenterCall(secret, "backend_registered")) return refusal("refused");
-        const std::uint64_t before = m_broker.backendGeneration(app);
-        ok = m_broker.registerBackend(app, module, m_clock(), instance);
-        // A click in the app's previous run isn't one for its new backend.
-        if (ok && m_broker.backendGeneration(app) != before) m_clickTokens.erase(app);
-        effects = m_broker.takeEffects();
-    }
-    run(std::move(effects));
-    return reply(ok);
-}
-
-std::string IntentsService::backendUnregistered(const std::string& secret, const std::string& app)
-{
-    std::vector<Effect> effects;
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!presenterCall(secret, "backend_unregistered")) return refusal("refused");
-        m_broker.unregisterBackend(app, m_clock());
-        m_clickTokens.erase(app);
-        effects = m_broker.takeEffects();
-    }
-    run(std::move(effects));
-    return reply(true);
-}
-
 std::string IntentsService::setInstalled(const std::string& secret, const std::string& packagesJson)
 {
     std::lock_guard<std::mutex> installing(m_installMutex);
@@ -360,7 +284,6 @@ std::string IntentsService::setInstalled(const std::string& secret, const std::s
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_registry.rebuild(loaded);
-        m_broker.dropStaleBackends(m_clock());
         effects = m_broker.takeEffects();
         for (const std::string& d : m_registry.diagnostics()) logLine(d);
         out = json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
@@ -416,7 +339,6 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
                             stringAt(shell, "iconSource"));
     m_registry.setRestrictions(restricted);
     if (link) m_registry.registerLinkRequester(linkName, stringList(findKey(*link, "webIntents")));
-    m_broker.dropStaleBackends(m_clock());
     return json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
 }
 
@@ -433,7 +355,7 @@ std::string IntentsService::shellRequest(const std::string& secret, const std::s
         // Each one ends as a work item, so the presenter's own requests have a rate too.
         if (!m_broker.admit(requester, m_clock())) return refusal(err::failed);
         const json params = paramsJson.empty() ? json::object() : parseBounded(paramsJson, kPayloadLimits);
-        const IntentBroker::Ticket t = m_broker.submit(requester, intent, params, /*clicked=*/true,
+        const IntentBroker::Ticket t = m_broker.submit(requester, intent, params,
                                                        /*fromPresenter=*/true, m_clock());
         effects = m_broker.takeEffects();
         // Its result comes back as a work item, so no receipt.
@@ -452,10 +374,6 @@ void IntentsService::tick()
         effects = std::move(m_deferredSettled);
         m_deferredSettled.clear();
         m_broker.tick(now);
-        for (auto it = m_clickTokens.begin(); it != m_clickTokens.end();) {
-            if (now > it->second.expires) it = m_clickTokens.erase(it);
-            else ++it;
-        }
         for (Effect& e : m_broker.takeEffects()) effects.push_back(std::move(e));
     }
     run(std::move(effects));

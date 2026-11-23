@@ -3,7 +3,7 @@ module intents {
   description "What apps and modules use: ask for an intent and pull its result, or answer one delivered to you. Bind it to intents_module."
   depends []
 
-  method request(intent: tstr, params_json: tstr, click_token: tstr) -> tstr
+  method request(intent: tstr, params_json: tstr) -> tstr
   method result(handle: tstr, receipt: tstr) -> tstr
   method cancel(handle: tstr, receipt: tstr) -> tstr
   method respond(dispatch: tstr, ok: bool, data_json: tstr, error: tstr) -> tstr

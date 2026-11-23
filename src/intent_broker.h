@@ -1,8 +1,8 @@
 #pragma once
 
 // Resolve an intent to a provider, get a person's attention when one is needed,
-// deliver, and keep the result for the requester alone. Ported from
-// logos-basecamp's IntentBroker.
+// deliver, and keep the result for the requester alone. It knows modules and
+// intents only: the presenter decides how and when to reach the person.
 //
 // No threads, no I/O and no clock of its own: every call takes `now`, and what
 // the broker needs from the world comes back as effects (takeEffects()) and
@@ -24,19 +24,7 @@ namespace intents {
 
 using json = nlohmann::json;
 
-// How the presenter reaches a person.
-enum class Attention {
-    // No presenter has claimed yet: nobody can be asked, so nothing is delivered.
-    Unclaimed,
-    // A terminal presenter the person opened for this: everything is shown at once.
-    Immediate,
-    // A desktop shell: only a request with a click behind it may pop up; the
-    // rest wait in the pending list until the person opens them.
-    Interactive,
-};
-
 struct BrokerConfig {
-    std::int64_t activationMs = 45000;          // loading a provider app
     std::int64_t responseMs = 20000;            // a provider that never took the delivery
     std::int64_t errorFloorMs = 400;            // the earliest a refusal settles
     std::int64_t backstopMs = 10 * 60 * 1000;   // a choice on screen, an accepted delivery
@@ -83,33 +71,19 @@ public:
     // unguessable in production.
     IntentBroker(IntentRegistry& registry, IdFn mintId, BrokerConfig config = {});
 
-    void setAttention(Attention attention) { m_attention = attention; }
-    Attention attention() const { return m_attention; }
-
-    // ── App backends, as the presenter registered them ─────────────────
-    // Refused when the app isn't an installed ui_qml package, when `module` is
-    // an installed package's name, or when it already serves another app.
-    // `instance` names the backend's run: the same one again changes nothing;
-    // another, or none, is a new backend.
-    bool registerBackend(const std::string& app, const std::string& module, std::int64_t now,
-                         const std::string& instance = {});
-    void unregisterBackend(const std::string& app, std::int64_t now);
-    // After the installed set or the shell changes: drops every registration
-    // registerBackend() would now refuse.
-    void dropStaleBackends(std::int64_t now);
-    std::string appForBackend(const std::string& module) const;
-    // Changes whenever the app gets a new backend; 0 with none.
-    std::uint64_t backendGeneration(const std::string& app) const;
+    // Until a presenter has claimed, nobody can be asked: every request is unavailable.
+    void setClaimed() { m_claimed = true; }
 
     // ── Requesters ──────────────────────────────────────────────────────
     // Spends one of the requester's request tokens; false when it has none left.
     bool admit(const std::string& requester, std::int64_t now);
 
-    // `requester` is the attested name: an app (via its registered backend) or
-    // a core module. `fromPresenter` marks the shell's and links' own requests;
-    // nothing else can set it, so a module can't pass for them by name.
+    // `requester` is the module's attested name. Its request waits as `pending`
+    // until the presenter opens it. `fromPresenter` marks the shell's and links'
+    // own requests, which are open already; nothing else can set it, so a module
+    // can't pass for them by name.
     Ticket submit(const std::string& requester, const std::string& intent, const json& params,
-                  bool clicked, bool fromPresenter, std::int64_t now);
+                  bool fromPresenter, std::int64_t now);
     // { ok:false, error:"unknown_handle" } | { ok, state:"pending" }
     // | { ok, state:"settled", result:{ok,data,error} }
     json result(const std::string& requester, const std::string& handle,
@@ -122,8 +96,7 @@ public:
     // Whether `dispatchId` is waiting for an answer from `module`: a cheap check
     // before anything the module sent is parsed.
     bool awaitsResponseFrom(const std::string& module, const std::string& dispatchId) const;
-    // Only the module the dispatch went to, and only while it is still the
-    // app's registered backend.
+    // Only the module the dispatch went to.
     bool respond(const std::string& responderModule, const std::string& dispatchId,
                  bool ok, const json& data, const std::string& error, std::int64_t now);
     // How the Deliver effect went: not reached, reached but not taken, or taken.
@@ -144,7 +117,7 @@ public:
     std::size_t resultBytes() const { return m_resultBytesTotal; }
 
 private:
-    enum class Phase { Accepted, Pending, AwaitingChoice, Activating, Dispatched };
+    enum class Phase { Accepted, Pending, AwaitingChoice, Dispatched };
     enum class Path { ProviderResponse, Deadline, EndpointGone, Abandoned, Rejected };
 
     struct Floor {
@@ -161,7 +134,7 @@ private:
         std::string intent;
         json params;
         std::size_t paramsBytes = 0;
-        bool clicked = false;
+        bool opened = false;   // by the presenter; the shell's own requests start open
         bool fromPresenter = false;
 
         Phase phase = Phase::Accepted;
@@ -177,10 +150,8 @@ private:
         std::string deliverWorkId;
 
         std::string provider;          // the registry name
-        std::uint64_t providerRevision = 0;   // the package as it was when picked
         std::vector<IntentRegistry::ParamSpec> resultSpec;   // as it was when delivered
         std::string providerModule;    // where it was delivered; empty for the shell
-        std::uint64_t providerGeneration = 0;
         bool providerAccepted = false;
         bool didNavigate = false;
         bool isHandoff = false;
@@ -194,21 +165,15 @@ private:
         std::size_t bytes = 0;
     };
 
-    struct Backend {
-        std::string module;
-        std::uint64_t generation = 0;
-        std::string instance;
-    };
-
     struct Bucket {
         double tokens = 0;
         std::int64_t at = 0;
     };
 
-    enum class WorkKind { Choose, Activate, Pending, ShellDeliver };
+    enum class WorkKind { Choose, Pending, ShellDeliver };
     struct WorkTarget {
         WorkKind kind;
-        std::string target;   // dispatch id, or the app for Activate
+        std::string target;   // dispatch id
     };
 
     struct WorkItem {
@@ -229,12 +194,6 @@ private:
         bool fromPresenter = false;
     };
 
-    struct Activation {
-        std::vector<std::string> ids;   // the requests waiting on the app
-        std::string workId;             // its `activate`, until the presenter answers
-    };
-
-    std::string backendRefusal(const std::string& app, const std::string& module) const;
     void start(const std::string& id, std::int64_t now);
     void park(const std::string& id, std::int64_t now);
     void offerInstall(const std::string& intent, std::int64_t now);
@@ -258,8 +217,6 @@ private:
     void holdRefusal(const Request& r, const std::string& code, std::int64_t now);
     void settleRefusal(const std::string& handle, const Refusal& refusal, std::int64_t now);
     void eraseSettled(std::map<std::string, Settled>::iterator it);
-    void drainActivation(const std::string& app, bool ready, std::int64_t now);
-    void endActivation(const std::string& app);
     std::string pushWork(json item, std::optional<WorkTarget> target = std::nullopt);
     void dropWorkTarget(const std::string& workId);
     Request* find(const std::string& id);
@@ -269,16 +226,13 @@ private:
     IntentRegistry& m_registry;
     IdFn m_mintId;
     BrokerConfig m_config;
-    Attention m_attention = Attention::Unclaimed;
+    bool m_claimed = false;
 
     std::map<std::string, Request> m_open;            // dispatch id -> request
     std::map<std::string, std::string> m_byHandle;    // handle -> dispatch id
     std::map<std::string, Settled> m_settled;         // handle -> result
     std::map<std::string, Refusal> m_refused;         // handle -> refusal held to its floor
     std::size_t m_resultBytesTotal = 0;
-    std::map<std::string, Backend> m_backends;        // app -> backend
-    std::uint64_t m_backendGeneration = 0;
-    std::map<std::string, Activation> m_activation;   // app -> its activation
     std::map<std::string, Bucket> m_buckets;          // requester -> request tokens
     std::map<std::string, std::int64_t> m_lastOffer;  // intent -> last install offer
 

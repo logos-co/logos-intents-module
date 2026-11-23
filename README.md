@@ -163,9 +163,11 @@ registry refuses anything else), and requester and display names are stripped of
 control, bidirectional and invisible characters. Params in a `deliver` item are
 the requester's and are passed as they are.
 
-## Security
+## Design and security
 
-See [`docs/security.md`](docs/security.md).
+Why it is built this way, what is done and what is left before the 0.5 switch:
+[`docs/design.md`](docs/design.md). The security rules and who enforces each:
+[`docs/security.md`](docs/security.md).
 
 ## Build and test
 

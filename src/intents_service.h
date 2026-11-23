@@ -37,8 +37,10 @@ public:
     };
     using Clock = std::function<std::int64_t()>;
     using IdFn = std::function<std::string()>;
+    using Loader = std::function<std::vector<LoadedPackage>(const std::vector<InstalledPackage>&)>;
 
-    IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config = {});
+    IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config = {},
+                   Loader load = loadPackages);
 
     // ── Requesters: app backends and core modules ───────────────────────
     std::string request(const std::string& intent, const std::string& paramsJson,
@@ -103,6 +105,9 @@ private:
     Outbound m_out;
     Clock m_clock;
     IdFn m_mintId;
+    Loader m_load;
+    // One set_installed at a time, so an older read can't land after a newer one.
+    std::mutex m_installMutex;
     // Delivery replies can arrive after this object is gone; they check this first.
     std::shared_ptr<int> m_alive = std::make_shared<int>(0);
 

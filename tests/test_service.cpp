@@ -7,7 +7,11 @@
 #include "intents_service.h"
 #include "test_support.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 using namespace intents;
 using logos::CallCaller;
@@ -509,4 +513,55 @@ LOGOS_TEST(a_new_backend_run_starts_without_the_last_runs_click)
         h.service->request("signing.approve", "{}", token);
     }
     LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
+}
+
+// The host may call set_installed from more than one thread. A call that
+// started later must land later, however long the earlier one reads.
+LOGOS_TEST(overlapping_set_installed_calls_land_in_the_order_they_started)
+{
+    test::TempPackages dir;
+    const json older = json::array({json{{"name", "old_ui"}, {"installDir", dir.add("old_ui", pkg("old_ui", "ui_qml"))}}});
+    const json newer = json::array({json{{"name", "new_ui"}, {"installDir", dir.add("new_ui", pkg("new_ui", "ui_qml"))}}});
+
+    std::mutex m;
+    std::condition_variable cv;
+    int entered = 0;
+    bool release = false;
+    const auto load = [&](const std::vector<InstalledPackage>& list) {
+        std::unique_lock<std::mutex> lock(m);
+        const int call = ++entered;
+        cv.notify_all();
+        if (call == 1) cv.wait(lock, [&] { return release; });   // the first read is slow
+        return loadPackages(list);
+    };
+    IntentsService s(IntentsService::Outbound{}, []() { return std::int64_t(0); }, test::counterIds(), {}, load);
+    std::string secret;
+    {
+        const CallCaller host = CallCaller::host();
+        secret = json::parse(s.claim(R"({"attention":"immediate"})"))["secret"].get<std::string>();
+    }
+    const auto install = [&](const json& packages) {
+        const CallCaller host = CallCaller::host();
+        s.setInstalled(secret, packages.dump());
+    };
+
+    std::thread first(install, older);
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return entered == 1; });
+    }
+    std::thread second(install, newer);
+    {
+        // Without the fix the second read runs now; with it, it waits its turn.
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait_for(lock, std::chrono::milliseconds(200), [&] { return entered == 2; });
+        release = true;
+        cv.notify_all();
+    }
+    first.join();
+    second.join();
+
+    const CallCaller host = CallCaller::host();
+    LOGOS_ASSERT_TRUE(json::parse(s.registerClickToken(secret, "0123456789abcdef", "new_ui", ""))["ok"].get<bool>());
+    LOGOS_ASSERT_FALSE(json::parse(s.registerClickToken(secret, "0123456789abcdef", "old_ui", ""))["ok"].get<bool>());
 }

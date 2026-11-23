@@ -46,7 +46,7 @@ public:
 
     // ── Presenter: the frontend that started this module ────────────────
     // Once, by the host, before any app loads. Answers { ok, secret }.
-    // options: { "attention": "interactive" | "immediate" | "headless" }.
+    // options: { "attention": "interactive" | "immediate" }.
     std::string claim(const std::string& options_json);
 
     std::string next_work(const std::string& secret);
@@ -62,14 +62,9 @@ public:
     // [{ name, installDir, displayName?, iconSource? }]
     std::string set_installed(const std::string& secret, const std::string& packages_json);
 
-    // { byName: { pkg: [intent] }, webByName: { pkg: [intent] } }
-    std::string set_installable(const std::string& secret, const std::string& catalog_json);
-
     // { name, reservedPrefix, uses, provides, handoff, displayName, iconSource,
     //   restricted: { intent: [requester] }, link: { name, webIntents } }
     std::string declare_shell(const std::string& secret, const std::string& shell_json);
-
-    std::string configure_provider(const std::string& secret, const std::string& intent, const std::string& provider);
 
     std::string shell_request(const std::string& secret, const std::string& intent, const std::string& params_json, bool as_link);
 

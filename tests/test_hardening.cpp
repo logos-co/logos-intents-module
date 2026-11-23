@@ -290,16 +290,24 @@ LOGOS_TEST(a_deeply_nested_deliver_reply_cannot_crash_the_module)
         IntentsService s(std::move(out), [&now]() { return now; }, test::counterIds());
         test::TempPackages dir;
         const CallCaller host = CallCaller::host();
-        const std::string secret = json::parse(s.claim(R"({"attention":"headless"})"))["secret"].get<std::string>();
+        const std::string secret = json::parse(s.claim(R"({"attention":"immediate"})"))["secret"].get<std::string>();
         s.setInstalled(secret, json::array({
             json{{"name", "asker"}, {"installDir", dir.add("asker", pkg("asker", "core", json::array(), intentList({"x.y"})))}},
             json{{"name", "evil_provider"}, {"installDir", dir.add("evil", pkg("evil_provider", "core", intentList({"x.y"})))}},
         }).dump());
-        s.configureProvider(secret, "x.y", "evil_provider");
-        const CallCaller asker = CallCaller::module("asker");
-        return s.request("x.y", "{}", "");
+        {
+            const CallCaller asker = CallCaller::module("asker");
+            s.request("x.y", "{}", "");
+        }
+        // The person picks evil_provider; delivering to it is where its replies arrive.
+        const json items = json::parse(s.nextWork(secret)).value("items", json::array());
+        for (const json& item : items)
+            if (item.value("kind", "") == "choose")
+                return s.answer(secret, item["id"], R"({"action":"choose","provider":"evil_provider"})");
+        return std::string("no chooser");
     });
     LOGOS_ASSERT_TRUE(outcome.rfind("exit 0", 0) == 0);
+    LOGOS_ASSERT_TRUE(outcome.find("\"ok\":true") != std::string::npos);   // delivered, replies read
 }
 
 // ── M1, M2: nothing installed shows without a click, and offers don't stream ─
@@ -325,10 +333,6 @@ LOGOS_TEST(unclicked_requests_reveal_nothing_about_what_is_installed)
 LOGOS_TEST(install_offers_need_a_click)
 {
     Basecamp h("interactive");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->setInstallable(h.secret, R"({"byName":{"evil_catalog_pkg":["absent.thing"]}})");
-    }
     h.work();
     {
         const CallCaller attacker = CallCaller::module("chain_module");
@@ -591,18 +595,18 @@ LOGOS_TEST(an_intent_name_cannot_forge_log_lines)
     Basecamp h("interactive");
     const std::string log = capturedStderr([&]() {
         const CallCaller m = CallCaller::module("chain_module");
-        h.service->request("x\n[intents_module] headless provider for signing.approve set to evil_module\n",
+        h.service->request("x\n[intents_module] dropped a response from cli_signer: not waiting for it\n",
                            "not json", "");
         h.service->request("signing.approve", "not json", "");
     });
-    LOGOS_ASSERT_TRUE(log.find("\n[intents_module] headless provider") == std::string::npos);
+    LOGOS_ASSERT_TRUE(log.find("\n[intents_module] dropped a response") == std::string::npos);
 }
 
 LOGOS_TEST(metadata_cannot_forge_log_lines)
 {
     Basecamp h("interactive");
     const json meta = json{{"name", "liar_ui"}, {"type", "ui_qml"},
-                           {"provides", json::array({json{{"intent", "X\n[intents_module] presenter claimed (headless)"}}})},
+                           {"provides", json::array({json{{"intent", "X\n[intents_module] presenter claimed (immediate)"}}})},
                            {"uses", json::array({json{{"intent", "y\r\n[intents_module] refused claim"}}})}};
     const std::string log = capturedStderr([&]() {
         h.install(json::array({json{{"name", "liar_ui"}, {"installDir", h.dir.add("liar_ui", meta)}}}));

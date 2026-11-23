@@ -26,8 +26,8 @@ using json = nlohmann::json;
 
 // How the presenter reaches a person.
 enum class Attention {
-    // No presenter: only a provider the host configured is used, without asking anyone.
-    Headless,
+    // No presenter has claimed yet: nobody can be asked, so nothing is delivered.
+    Unclaimed,
     // A terminal presenter the person opened for this: everything is shown at once.
     Immediate,
     // A desktop shell: only a request with a click behind it may pop up; the
@@ -85,9 +85,6 @@ public:
 
     void setAttention(Attention attention) { m_attention = attention; }
     Attention attention() const { return m_attention; }
-
-    // Headless only: the provider used for `intent`. Empty clears it.
-    void configureProvider(const std::string& intent, const std::string& provider);
 
     // ── App backends, as the presenter registered them ─────────────────
     // Refused when the app isn't an installed ui_qml package, when `module` is
@@ -240,7 +237,7 @@ private:
     std::string backendRefusal(const std::string& app, const std::string& module) const;
     void start(const std::string& id, std::int64_t now);
     void park(const std::string& id, std::int64_t now);
-    void offerInstall(const std::string& requester, const std::string& intent, std::int64_t now);
+    void offerInstall(const std::string& intent, std::int64_t now);
     void presentChoice(const std::string& id, std::int64_t now);
     bool showChoice(const std::string& id, std::int64_t now);
     bool stillEligible(const Request& r, const std::string& provider) const;
@@ -272,14 +269,13 @@ private:
     IntentRegistry& m_registry;
     IdFn m_mintId;
     BrokerConfig m_config;
-    Attention m_attention = Attention::Headless;
+    Attention m_attention = Attention::Unclaimed;
 
     std::map<std::string, Request> m_open;            // dispatch id -> request
     std::map<std::string, std::string> m_byHandle;    // handle -> dispatch id
     std::map<std::string, Settled> m_settled;         // handle -> result
     std::map<std::string, Refusal> m_refused;         // handle -> refusal held to its floor
     std::size_t m_resultBytesTotal = 0;
-    std::map<std::string, std::string> m_configured;  // intent -> provider (headless)
     std::map<std::string, Backend> m_backends;        // app -> backend
     std::uint64_t m_backendGeneration = 0;
     std::map<std::string, Activation> m_activation;   // app -> its activation

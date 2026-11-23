@@ -78,6 +78,14 @@ struct Harness {
         return call(service->nextWork(secret)).value("items", json::array());
     }
 
+    // The person picks `provider` in the chooser on screen.
+    void choose(const std::string& provider)
+    {
+        const json shown = workOfKind(work(), "choose").at(0);
+        const CallCaller host = CallCaller::host();
+        service->answer(secret, shown["id"], json{{"action", "choose"}, {"provider", provider}}.dump());
+    }
+
     std::string clickToken(const std::string& app, const std::string& intent = "")
     {
         const CallCaller host = CallCaller::host();
@@ -118,8 +126,9 @@ LOGOS_TEST(a_claim_with_unknown_options_is_refused)
     Harness h("immediate", /*claim=*/false);
     const CallCaller host = CallCaller::host();
     LOGOS_ASSERT_FALSE(h.call(h.service->claim(R"({"attention":"loud"})"))["ok"].get<bool>());
-    // The failed claim didn't use up the role.
-    LOGOS_ASSERT_TRUE(h.call(h.service->claim(R"({"attention":"headless"})"))["ok"].get<bool>());
+    LOGOS_ASSERT_FALSE(h.call(h.service->claim(R"({"attention":"headless"})"))["ok"].get<bool>());
+    // The failed claims didn't use up the role.
+    LOGOS_ASSERT_TRUE(h.call(h.service->claim(R"({"attention":"immediate"})"))["ok"].get<bool>());
 }
 
 LOGOS_TEST(every_presenter_method_needs_the_secret)
@@ -134,9 +143,7 @@ LOGOS_TEST(every_presenter_method_needs_the_secret)
     LOGOS_ASSERT_FALSE(h.call(h.service->backendRegistered(wrong, "signer_ui", "signer_ui_backend"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->backendUnregistered(wrong, "wallet_ui"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->setInstalled(wrong, "[]"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->setInstallable(wrong, "{}"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->declareShell(wrong, R"({"name":"x"})"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->configureProvider(wrong, "signing.approve", "cli_signer"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->shellRequest(wrong, "signing.approve", "{}", false))["ok"].get<bool>());
 }
 
@@ -376,16 +383,13 @@ LOGOS_TEST(a_backend_unregistered_after_delivery_cannot_respond)
 
 LOGOS_TEST(the_settled_event_carries_only_the_handle)
 {
-    Harness h("headless", true);
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->configureProvider(h.secret, "signing.approve", "cli_signer");
-    }
+    Harness h("immediate");
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
         r = h.call(h.service->request("signing.approve", R"({"amount":"1 ETH"})", ""));
     }
+    h.choose("cli_signer");
     const std::string dispatch = h.deliveries.at(0).args[0].get<std::string>();
     {
         const CallCaller provider = CallCaller::module("cli_signer");
@@ -397,16 +401,13 @@ LOGOS_TEST(the_settled_event_carries_only_the_handle)
 
 LOGOS_TEST(an_unreachable_provider_settles_unavailable_after_the_floor)
 {
-    Harness h("headless", true);
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->configureProvider(h.secret, "signing.approve", "cli_signer");
-    }
+    Harness h("immediate");
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
         r = h.call(h.service->request("signing.approve", "{}", ""));
     }
+    h.choose("cli_signer");
     h.deliveries.at(0).done(false, json());
     h.now += 400;
     h.service->tick();
@@ -452,9 +453,7 @@ Delivery delivered(Harness& h)
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
         h.service->request("signing.approve", "{}", "");
     }
-    const json choose = workOfKind(h.work(), "choose")[0];
-    const CallCaller host = CallCaller::host();
-    h.service->answer(h.secret, choose["id"], R"({"action":"choose","provider":"cli_signer"})");
+    h.choose("cli_signer");
     return h.deliveries.at(0);
 }
 

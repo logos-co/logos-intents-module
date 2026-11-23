@@ -297,7 +297,7 @@ Steps 1–7 are built during 0.4; 0.4 releases keep today's QML path on. Step 8 
 - the pending list next to activity, so Basecamp can claim `interactive`;
 - a follow-up request from a provider after a hand-off: Package Manager's `confirm_install` after `packages.install` has no click behind it;
 - IPC tests that drive the real contracts between modules, not only the unit tests;
-- open findings from review: an app's provider isn't checked for eligibility again when its backend comes up after activation; a `result` or `dismiss` work item can be evicted when the presenter stops pulling; a result is checked against the provider's `result` as it is when the answer arrives, not as it was when the request was delivered; registering the same backend run again clears that app's click token; two `set_installed` calls that overlap can apply out of order.
+- an open finding from review: a `result` or `dismiss` work item can be evicted when the presenter stops pulling, so the result of the shell's own request can be lost. Keeping results by handle for the presenter to fetch changes the presenter contract.
 
 ## Open questions
 

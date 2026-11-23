@@ -1,6 +1,5 @@
 #include "intents_module_impl.h"
 
-#include "client_pool.h"
 #include "intent_rules.h"
 #include "intents_service.h"
 
@@ -8,7 +7,9 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
-#include <logos_lp_client.h>
+// Generated: bind_intent_provider(module), the typed `deliver` of
+// contracts/intent_provider.lidl.
+#include "logos_sdk.h"
 
 #include <algorithm>
 #include <chrono>
@@ -59,11 +60,7 @@ std::string guarded(const char* method, F&& call)
 } // namespace
 
 struct IntentsModuleState {
-    explicit IntentsModuleState(intents::ClientPool<logos::LpClient>::Make make)
-        : clients(std::move(make)) {}
-
     std::unique_ptr<intents::IntentsService> service;
-    intents::ClientPool<logos::LpClient> clients;
 
     std::mutex timerMutex;
     std::condition_variable timerCv;
@@ -78,30 +75,23 @@ struct IntentsModuleState {
         }
         timerCv.notify_all();
         if (timer.joinable()) timer.join();
-        // Delivery callbacks call into the service: end them while it is alive.
-        clients.close();
     }
 };
 
 IntentsModuleImpl::IntentsModuleImpl()
-    : m_state(std::make_unique<IntentsModuleState>([this](const std::string& module) {
-          return std::make_shared<logos::LpClient>(module, moduleName());
-      }))
+    : m_state(std::make_unique<IntentsModuleState>())
 {
     IntentsModuleState* state = m_state.get();
 
     intents::IntentsService::Outbound out;
-    out.deliver = [state](const std::string& module, const nlohmann::json& args,
-                          std::function<void(bool, const nlohmann::json&)> done) {
-        const auto client = state->clients.get(module);
-        if (!client) {
-            done(false, nlohmann::json());   // unloading
-            return;
-        }
-        client->invokeAsyncResult(
-            "deliver", args,
-            [done](nlohmann::json reply, const logos::CallError& error) {
-                done(error.ok(), reply);
+    // args: [dispatch, intent, params_json, requester], as the service builds them.
+    out.deliver = [this](const std::string& module, const nlohmann::json& args,
+                         std::function<void(bool, const nlohmann::json&)> done) {
+        modules().bind_intent_provider(module).deliverAsyncResult(
+            args.at(0).get<std::string>(), args.at(1).get<std::string>(),
+            args.at(2).get<std::string>(), args.at(3).get<std::string>(),
+            [done](logos::AsyncResult<std::string> reply) {
+                done(reply.ok(), nlohmann::json(reply.value));
             },
             kDeliverTimeoutMs);
     };

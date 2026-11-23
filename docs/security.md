@@ -55,7 +55,6 @@ of name. Neither is a `logosctl` user before the host has claimed.
 | Work items someone must answer are never dropped from the queue, and there are never more of them than open requests and apps being raised; past 1000 items the oldest notice goes, then the oldest `result` or `dismiss`. Items that end before they're pulled are withdrawn, not answered with `dismiss` | `pushWork`, `dropWorkTarget` | `the_work_queue_stays_bounded_when_the_presenter_stops_pulling`, `withdrawn_requests_cannot_crowd_out_another_apps_chooser`, `a_flood_of_notices_cannot_push_out_a_chooser`, `the_work_queue_does_not_keep_withdrawn_payloads` |
 | Presenter input is read with checked reads, and an answer changes nothing unless it is valid; any exception that still escapes becomes a refusal | `answer`, `claim`, `guarded` | `a_malformed_presenter_answer_changes_nothing`, `a_shell_answer_with_a_null_error_completes`, `a_claim_with_a_non_string_option_is_refused` |
 | Every log line is one line: untrusted text is escaped and truncated, payloads are never logged (8) | `forLog` | `log_fields_stay_on_one_line`, `an_intent_name_cannot_forge_log_lines`, `metadata_cannot_forge_log_lines` |
-| At unload, provider clients are destroyed while the service is alive, which waits out any running delivery callback; after that no client is made and a delivery fails as `unavailable` | `ClientPool`, `IntentsModuleState::stop` | `closing_destroys_every_client_before_it_returns`, `no_client_is_made_after_the_pool_closes`, `a_callback_finishing_during_close_gets_no_client` |
 | A provider's answer must fit the `result` it declared (required fields, declared types; others pass), or the requester gets `failed` | `IntentBroker::resultViolation` | `an_answer_that_misses_its_declared_result_is_failed`, `a_provides_entry_describes_its_result_like_its_params` |
 | A provider can't mint `not_declared` / `unavailable` | `normalizeError` | `a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload` |
 
@@ -120,4 +119,11 @@ Accepted for now; each is a policy choice, not a bug in a check.
 - **Global budgets are shared.** Packages acting together can use up the 64 MiB
   of results (evicting anyone's oldest) or the 1024 open requests.
 - **Non-string `deliver` replies** are parsed by the SDK before the module sees
-  them, so the 64 KiB limit applies only to string replies.
+  them (and then count as not taken), so the 64 KiB limit applies only to
+  string replies.
+- **Delivery replies after unload.** Provider clients are the SDK's
+  (`bind_intent_provider`) and last as long as the process. A reply after
+  `aboutToUnload` still reaches the service, which is alive until then, and
+  one after the service is gone is dropped (`m_alive`); one racing the
+  service's destruction at exit isn't excluded. Closing a module's clients at
+  unload is for the SDK, for every module.

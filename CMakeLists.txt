@@ -14,7 +14,6 @@ logos_module(
     SOURCES
         src/intents_module_impl.h
         src/intents_module_impl.cpp
-        src/client_pool.h
         src/intents_service.h
         src/intents_service.cpp
         src/intent_broker.h

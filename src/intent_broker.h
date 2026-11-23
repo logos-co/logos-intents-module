@@ -179,6 +179,7 @@ private:
 
         std::string provider;          // the registry name
         std::uint64_t providerRevision = 0;   // the package as it was when picked
+        std::vector<IntentRegistry::ParamSpec> resultSpec;   // as it was when delivered
         std::string providerModule;    // where it was delivered; empty for the shell
         std::uint64_t providerGeneration = 0;
         bool providerAccepted = false;
@@ -248,8 +249,8 @@ private:
     void dispatch(const std::string& id, std::int64_t now);
     std::string specViolation(const std::string& provider, const std::string& intent,
                               const json& params) const;
-    std::string resultViolation(const std::string& provider, const std::string& intent,
-                                const json& data) const;
+    static std::string resultViolation(const std::vector<IntentRegistry::ParamSpec>& spec,
+                                       const json& data);
     void failWithFloor(const std::string& id, const std::string& code, Path path, std::int64_t now);
     void finish(const std::string& id, bool ok, const json& data, const std::string& error,
                 Path path, std::int64_t now);

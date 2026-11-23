@@ -1093,3 +1093,25 @@ LOGOS_TEST(a_link_cannot_reach_an_app_that_dropped_web_while_coming_up)
     LOGOS_ASSERT_EQ(results.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(results[0]["result"]["error"].get<std::string>(), err::unavailable);
 }
+
+// An answer is held to what the provider declared when it was given the
+// request, not to metadata installed since.
+LOGOS_TEST(an_answer_is_checked_against_the_result_declared_at_delivery)
+{
+    World w(Attention::Headless);
+    const auto stamp = [](const char* field) {
+        return pkg("stamp_module", "core", json::array({json{
+            {"intent", "stamp.make"},
+            {"result", json::array({json{{"name", field}, {"type", "string"}, {"required", true}}})},
+        }}));
+    };
+    const json asker = pkg("asker_module", "core", json::array(), intentList({"stamp.make"}));
+    reinstall(w, {walletPackage(), asker, stamp("signature")});
+    w.broker.configureProvider("stamp.make", "stamp_module");
+    const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+    const auto d = ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId;
+
+    reinstall(w, {walletPackage(), asker, stamp("approvalId")});
+    LOGOS_ASSERT_TRUE(w.broker.respond("stamp_module", d, true, json{{"signature", "ab"}}, "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(t, "asker_module"), std::string());
+}

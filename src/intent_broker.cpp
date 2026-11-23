@@ -612,10 +612,9 @@ std::string IntentBroker::specViolation(const std::string& provider, const std::
 
 // The answer against the provider's declared `result`, as params are checked
 // against `params`; nothing declared, nothing checked.
-std::string IntentBroker::resultViolation(const std::string& provider, const std::string& intent,
-                                          const json& data) const
+std::string IntentBroker::resultViolation(const std::vector<IntentRegistry::ParamSpec>& spec,
+                                          const json& data)
 {
-    const std::vector<IntentRegistry::ParamSpec>& spec = m_registry.resultSpecFor(provider, intent);
     if (spec.empty()) return {};
     if (!data.is_object()) return "the result is not an object";
     for (const IntentRegistry::ParamSpec& field : spec) {
@@ -645,8 +644,10 @@ void IntentBroker::dispatch(const std::string& id, std::int64_t now)
 
     r->phase = Phase::Dispatched;
     r->phaseSince = now;
-    // Snapshot: a rebuild mustn't change the navigation of a request in flight.
+    // Snapshot: a rebuild mustn't change the navigation of a request in flight,
+    // nor what its answer is checked against.
     r->isHandoff = m_registry.isHandoff(r->provider, r->intent);
+    r->resultSpec = m_registry.resultSpecFor(r->provider, r->intent);
 
     if (m_registry.isShell(r->provider)) {
         r->providerAccepted = true;
@@ -720,7 +721,7 @@ bool IntentBroker::respond(const std::string& responderModule, const std::string
         return false;
     }
     if (ok) {
-        if (const std::string violation = resultViolation(r->provider, r->intent, data); !violation.empty()) {
+        if (const std::string violation = resultViolation(r->resultSpec, data); !violation.empty()) {
             logLine("provider " + r->provider + " answered " + r->intent + " outside its declared result: "
                     + violation);
             finish(dispatchId, false, json(), err::failed, Path::ProviderResponse, now);

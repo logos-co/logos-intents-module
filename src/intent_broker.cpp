@@ -190,6 +190,12 @@ bool IntentBroker::registerBackend(const std::string& app, const std::string& mo
     return true;
 }
 
+std::uint64_t IntentBroker::backendGeneration(const std::string& app) const
+{
+    const auto b = m_backends.find(app);
+    return b == m_backends.end() ? 0 : b->second.generation;
+}
+
 void IntentBroker::unregisterBackend(const std::string& app, std::int64_t now)
 {
     const auto b = m_backends.find(app);

@@ -475,3 +475,38 @@ LOGOS_TEST(a_delivery_not_taken_times_out_at_the_response_deadline)
     h.service->tick();
     LOGOS_ASSERT_EQ(h.settled.size(), std::size_t(1));
 }
+
+// Registering the backend's run again changes nothing, not even the click in flight.
+LOGOS_TEST(registering_the_same_backend_run_again_keeps_the_click_token)
+{
+    Harness h("interactive");
+    {
+        const CallCaller host = CallCaller::host();
+        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-1");
+    }
+    const std::string token = h.clickToken("wallet_ui");
+    {
+        const CallCaller host = CallCaller::host();
+        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-1");
+    }
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        h.service->request("signing.approve", "{}", token);
+    }
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "choose").size(), std::size_t(1));
+}
+
+LOGOS_TEST(a_new_backend_run_starts_without_the_last_runs_click)
+{
+    Harness h("interactive");
+    const std::string token = h.clickToken("wallet_ui");
+    {
+        const CallCaller host = CallCaller::host();
+        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-2");
+    }
+    {
+        const CallCaller backend = CallCaller::module("wallet_ui_backend");
+        h.service->request("signing.approve", "{}", token);
+    }
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
+}

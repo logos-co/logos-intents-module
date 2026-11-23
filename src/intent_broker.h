@@ -101,6 +101,8 @@ public:
     // registerBackend() would now refuse.
     void dropStaleBackends(std::int64_t now);
     std::string appForBackend(const std::string& module) const;
+    // Changes whenever the app gets a new backend; 0 with none.
+    std::uint64_t backendGeneration(const std::string& app) const;
 
     // ── Requesters ──────────────────────────────────────────────────────
     // Spends one of the requester's request tokens; false when it has none left.

@@ -321,8 +321,10 @@ std::string IntentsService::backendRegistered(const std::string& secret, const s
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!presenterCall(secret, "backend_registered")) return refusal("refused");
+        const std::uint64_t before = m_broker.backendGeneration(app);
         ok = m_broker.registerBackend(app, module, m_clock(), instance);
-        if (ok) m_clickTokens.erase(app);
+        // A click in the app's previous run isn't one for its new backend.
+        if (ok && m_broker.backendGeneration(app) != before) m_clickTokens.erase(app);
         effects = m_broker.takeEffects();
     }
     run(std::move(effects));

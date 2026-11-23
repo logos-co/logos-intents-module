@@ -472,6 +472,45 @@ LOGOS_TEST(params_that_are_not_plain_data_or_miss_the_spec_are_bad_requests)
     LOGOS_ASSERT_EQ(w.settledError(missing), err::badRequest);
 }
 
+// A provider that declares the shape of its answer is held to it: the
+// requester gets `failed` rather than data it can't read.
+LOGOS_TEST(an_answer_that_misses_its_declared_result_is_failed)
+{
+    World w(Attention::Headless);
+    w.registry.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
+        {"intent", "stamp.make"},
+        {"result", json::array({json{{"name", "stamp"}, {"type", "string"}, {"required", true}}})},
+    }})), "", "");
+    w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
+    w.broker.configureProvider("stamp.make", "stamp_module");
+    const auto ask = [&]() {
+        return w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+    };
+    const auto delivered = [&]() { return ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId; };
+
+    const auto missing = ask();
+    LOGOS_ASSERT_FALSE(w.broker.respond("stamp_module", delivered(), true, json::object(), "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(missing, "asker_module"), err::failed);
+
+    const auto wrongType = ask();
+    LOGOS_ASSERT_FALSE(w.broker.respond("stamp_module", delivered(), true, json{{"stamp", 5}}, "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(wrongType, "asker_module"), err::failed);
+
+    const auto notAnObject = ask();
+    LOGOS_ASSERT_FALSE(w.broker.respond("stamp_module", delivered(), true, json("ab"), "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(notAnObject, "asker_module"), err::failed);
+
+    // Fields it didn't describe pass: an older description mustn't break a newer provider.
+    const auto good = ask();
+    LOGOS_ASSERT_TRUE(w.broker.respond("stamp_module", delivered(), true, json{{"stamp", "ab"}, {"at", 1}}, "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(good, "asker_module"), std::string());
+
+    // Only answers are checked: a refusal carries no result.
+    const auto refused = ask();
+    LOGOS_ASSERT_TRUE(w.broker.respond("stamp_module", delivered(), false, json(), err::cancelled, w.now));
+    LOGOS_ASSERT_EQ(w.settledError(refused, "asker_module"), err::cancelled);
+}
+
 LOGOS_TEST(a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload)
 {
     World w(Attention::Headless, true);

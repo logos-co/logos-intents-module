@@ -595,6 +595,26 @@ std::string IntentBroker::specViolation(const std::string& provider, const std::
     return {};
 }
 
+// The answer against the provider's declared `result`, as params are checked
+// against `params`; nothing declared, nothing checked.
+std::string IntentBroker::resultViolation(const std::string& provider, const std::string& intent,
+                                          const json& data) const
+{
+    const std::vector<IntentRegistry::ParamSpec>& spec = m_registry.resultSpecFor(provider, intent);
+    if (spec.empty()) return {};
+    if (!data.is_object()) return "the result is not an object";
+    for (const IntentRegistry::ParamSpec& field : spec) {
+        const auto value = data.find(field.name);
+        if (value == data.end()) {
+            if (field.required) return "missing required field '" + forLog(field.name, 64) + "'";
+            continue;
+        }
+        if (!field.type.empty() && !matchesDeclaredType(*value, field.type))
+            return "field '" + forLog(field.name, 64) + "' should be " + forLog(field.type, 32);
+    }
+    return {};
+}
+
 void IntentBroker::dispatch(const std::string& id, std::int64_t now)
 {
     Request* r = find(id);
@@ -683,6 +703,14 @@ bool IntentBroker::respond(const std::string& responderModule, const std::string
         logLine("provider " + r->provider + " answered " + r->intent + " with a non-plain or oversized payload");
         finish(dispatchId, false, json(), err::failed, Path::ProviderResponse, now);
         return false;
+    }
+    if (ok) {
+        if (const std::string violation = resultViolation(r->provider, r->intent, data); !violation.empty()) {
+            logLine("provider " + r->provider + " answered " + r->intent + " outside its declared result: "
+                    + violation);
+            finish(dispatchId, false, json(), err::failed, Path::ProviderResponse, now);
+            return false;
+        }
     }
     finish(dispatchId, ok, data, normalizeError(ok, error), Path::ProviderResponse, now);
     return true;

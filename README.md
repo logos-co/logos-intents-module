@@ -78,12 +78,26 @@ answers `unknown_handle`. Watch your subscription's status (`LpClient`'s
 
 ### Providing
 
-List the intent in `provides` (with `params` for the payload you expect),
-implement `deliver(dispatch, intent, params_json, requester)`, accept it only
+List the intent in `provides` (with `params` for the payload you expect, and
+`result` for what your answer carries), implement
+`deliver(dispatch, intent, params_json, requester)`, accept it only
 when `logos::currentCaller().isModule("intents_module")`, and return
 `{"ok":true}` at once — within 5 seconds, or the provider counts as unreachable.
 Then answer with `respond(dispatch, ok, data_json, error)`, data of at most
 1 MiB. If a person has to see something, show it through your own view.
+
+`result` takes the syntax of `params`:
+
+```json
+{ "intent": "signing.approve",
+  "params": [ { "name": "handle", "type": "string", "required": true } ],
+  "result": [ { "name": "signature", "type": "string", "required": true } ] }
+```
+
+An answer with `ok` true must be an object with every required field, of the
+declared type; fields it doesn't describe pass. One that doesn't fit reaches
+the requester as `failed`. Refusals aren't checked, and an entry without
+`result` isn't either.
 
 **Cancelling.** A requester's `cancel` withdraws the request and drops its
 result. The provider isn't told, and a later `respond` from it is dropped.

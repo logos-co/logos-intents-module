@@ -155,6 +155,23 @@ LOGOS_TEST(install_offers_follow_what_is_installed)
     LOGOS_ASSERT_TRUE(r.declaresUse("basecamp_link", "share.text"));
 }
 
+LOGOS_TEST(a_provides_entry_describes_its_result_like_its_params)
+{
+    IntentRegistry r;
+    r.ingest("stamp_module", pkg("stamp_module", "core", json::array({json{
+        {"intent", "stamp.make"},
+        {"result", json::array({json{{"name", "stamp"}, {"type", "string"}, {"required", true}},
+                                json{{"type", "number"}}})},
+    }})), "", "");
+    const auto& spec = r.resultSpecFor("stamp_module", "stamp.make");
+    LOGOS_ASSERT_EQ(spec.size(), std::size_t(1));   // a field with no name is skipped
+    LOGOS_ASSERT_EQ(spec[0].name, std::string("stamp"));
+    LOGOS_ASSERT_EQ(spec[0].type, std::string("string"));
+    LOGOS_ASSERT_TRUE(spec[0].required);
+    LOGOS_ASSERT_TRUE(r.paramsSpecFor("stamp_module", "stamp.make").empty());
+    LOGOS_ASSERT_TRUE(r.resultSpecFor("stamp_module", "other.intent").empty());
+}
+
 LOGOS_TEST(restricted_intents_admit_only_their_requesters)
 {
     IntentRegistry r;

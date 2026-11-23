@@ -55,10 +55,12 @@ std::map<std::string, std::vector<std::string>> stringListMap(const json* v)
 
 } // namespace
 
-IntentsService::IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config)
+IntentsService::IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config,
+                               Loader load)
     : m_out(std::move(outbound))
     , m_clock(std::move(clock))
     , m_mintId(mintId)
+    , m_load(std::move(load))
     , m_broker(m_registry, std::move(mintId), config)
 {
 }
@@ -321,8 +323,10 @@ std::string IntentsService::backendRegistered(const std::string& secret, const s
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!presenterCall(secret, "backend_registered")) return refusal("refused");
+        const std::uint64_t before = m_broker.backendGeneration(app);
         ok = m_broker.registerBackend(app, module, m_clock(), instance);
-        if (ok) m_clickTokens.erase(app);
+        // A click in the app's previous run isn't one for its new backend.
+        if (ok && m_broker.backendGeneration(app) != before) m_clickTokens.erase(app);
         effects = m_broker.takeEffects();
     }
     run(std::move(effects));
@@ -345,6 +349,7 @@ std::string IntentsService::backendUnregistered(const std::string& secret, const
 
 std::string IntentsService::setInstalled(const std::string& secret, const std::string& packagesJson)
 {
+    std::lock_guard<std::mutex> installing(m_installMutex);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!presenterCall(secret, "set_installed")) return refusal("refused");
@@ -357,7 +362,7 @@ std::string IntentsService::setInstalled(const std::string& secret, const std::s
     for (const json& p : packages)
         list.push_back(InstalledPackage{stringAt(p, "name"), stringAt(p, "installDir"),
                                         stringAt(p, "displayName"), stringAt(p, "iconSource")});
-    const std::vector<LoadedPackage> loaded = loadPackages(list);
+    const std::vector<LoadedPackage> loaded = m_load(list);
 
     std::vector<Effect> effects;
     json out;

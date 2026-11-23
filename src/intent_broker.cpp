@@ -190,6 +190,12 @@ bool IntentBroker::registerBackend(const std::string& app, const std::string& mo
     return true;
 }
 
+std::uint64_t IntentBroker::backendGeneration(const std::string& app) const
+{
+    const auto b = m_backends.find(app);
+    return b == m_backends.end() ? 0 : b->second.generation;
+}
+
 void IntentBroker::unregisterBackend(const std::string& app, std::int64_t now)
 {
     const auto b = m_backends.find(app);
@@ -491,13 +497,21 @@ void IntentBroker::presentNextChoice(std::int64_t now)
     }
 }
 
-// What made the provider one to show: still allowed, still reachable by this
-// requester, and still the package that was shown.
+// The provider as the person was shown it.
 bool IntentBroker::stillEligible(const Request& r, const std::string& provider) const
 {
     const auto shown = r.choiceRevisions.find(provider);
-    if (shown == r.choiceRevisions.end() || shown->second != m_registry.revisionOf(provider)) return false;
+    return shown != r.choiceRevisions.end() && stillProvides(r, provider, shown->second);
+}
+
+// Still the package at `revision`, the requester still allowed, and the
+// provider still reachable by it.
+bool IntentBroker::stillProvides(const Request& r, const std::string& provider,
+                                 std::uint64_t revision) const
+{
+    if (m_registry.revisionOf(provider) != revision) return false;
     if (!m_registry.requesterAllowed(r.intent, r.requester)) return false;
+    if (provider == r.requester) return m_registry.declaresProvide(provider, r.intent);
     const IntentRegistry::Resolution current = m_registry.resolveFor(r.requester, r.intent);
     return std::any_of(current.found.begin(), current.found.end(),
                        [&](const IntentRegistry::ProviderEntry& e) { return e.moduleName == provider; });
@@ -509,6 +523,7 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
     Request* r = find(id);
     if (!r) return;
     r->provider = provider;
+    r->providerRevision = m_registry.revisionOf(provider);
     if (r->choicePresented) {
         r->choicePresented = false;
         dropWorkTarget(r->choiceWorkId);
@@ -558,6 +573,12 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
     for (const std::string& id : ids) {
         Request* r = find(id);
         if (!r || r->phase != Phase::Activating || r->floor) continue;
+        // The registry may have changed while the app came up.
+        if (ready && !stillProvides(*r, app, r->providerRevision)) {
+            logLine(app + " changed while it came up for " + r->intent + ": not delivered");
+            failWithFloor(id, err::unavailable, Path::Rejected, now);
+            continue;
+        }
         const auto b = m_backends.find(app);
         if (ready && b != m_backends.end()) {
             r->providerModule = b->second.module;
@@ -597,10 +618,9 @@ std::string IntentBroker::specViolation(const std::string& provider, const std::
 
 // The answer against the provider's declared `result`, as params are checked
 // against `params`; nothing declared, nothing checked.
-std::string IntentBroker::resultViolation(const std::string& provider, const std::string& intent,
-                                          const json& data) const
+std::string IntentBroker::resultViolation(const std::vector<IntentRegistry::ParamSpec>& spec,
+                                          const json& data)
 {
-    const std::vector<IntentRegistry::ParamSpec>& spec = m_registry.resultSpecFor(provider, intent);
     if (spec.empty()) return {};
     if (!data.is_object()) return "the result is not an object";
     for (const IntentRegistry::ParamSpec& field : spec) {
@@ -630,8 +650,10 @@ void IntentBroker::dispatch(const std::string& id, std::int64_t now)
 
     r->phase = Phase::Dispatched;
     r->phaseSince = now;
-    // Snapshot: a rebuild mustn't change the navigation of a request in flight.
+    // Snapshot: a rebuild mustn't change the navigation of a request in flight,
+    // nor what its answer is checked against.
     r->isHandoff = m_registry.isHandoff(r->provider, r->intent);
+    r->resultSpec = m_registry.resultSpecFor(r->provider, r->intent);
 
     if (m_registry.isShell(r->provider)) {
         r->providerAccepted = true;
@@ -705,7 +727,7 @@ bool IntentBroker::respond(const std::string& responderModule, const std::string
         return false;
     }
     if (ok) {
-        if (const std::string violation = resultViolation(r->provider, r->intent, data); !violation.empty()) {
+        if (const std::string violation = resultViolation(r->resultSpec, data); !violation.empty()) {
             logLine("provider " + r->provider + " answered " + r->intent + " outside its declared result: "
                     + violation);
             finish(dispatchId, false, json(), err::failed, Path::ProviderResponse, now);

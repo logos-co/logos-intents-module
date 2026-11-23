@@ -101,6 +101,8 @@ public:
     // registerBackend() would now refuse.
     void dropStaleBackends(std::int64_t now);
     std::string appForBackend(const std::string& module) const;
+    // Changes whenever the app gets a new backend; 0 with none.
+    std::uint64_t backendGeneration(const std::string& app) const;
 
     // ── Requesters ──────────────────────────────────────────────────────
     // Spends one of the requester's request tokens; false when it has none left.
@@ -178,6 +180,8 @@ private:
         std::string deliverWorkId;
 
         std::string provider;          // the registry name
+        std::uint64_t providerRevision = 0;   // the package as it was when picked
+        std::vector<IntentRegistry::ParamSpec> resultSpec;   // as it was when delivered
         std::string providerModule;    // where it was delivered; empty for the shell
         std::uint64_t providerGeneration = 0;
         bool providerAccepted = false;
@@ -240,14 +244,15 @@ private:
     void presentChoice(const std::string& id, std::int64_t now);
     bool showChoice(const std::string& id, std::int64_t now);
     bool stillEligible(const Request& r, const std::string& provider) const;
+    bool stillProvides(const Request& r, const std::string& provider, std::uint64_t revision) const;
     void presentNextChoice(std::int64_t now);
     bool aChoiceIsOnScreen() const;
     void selectProvider(const std::string& id, const std::string& provider, std::int64_t now);
     void dispatch(const std::string& id, std::int64_t now);
     std::string specViolation(const std::string& provider, const std::string& intent,
                               const json& params) const;
-    std::string resultViolation(const std::string& provider, const std::string& intent,
-                                const json& data) const;
+    static std::string resultViolation(const std::vector<IntentRegistry::ParamSpec>& spec,
+                                       const json& data);
     void failWithFloor(const std::string& id, const std::string& code, Path path, std::int64_t now);
     void finish(const std::string& id, bool ok, const json& data, const std::string& error,
                 Path path, std::int64_t now);

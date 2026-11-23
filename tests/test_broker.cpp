@@ -1055,3 +1055,63 @@ LOGOS_TEST(a_queued_chooser_with_no_provider_left_is_unavailable)
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(second), err::unavailable);
 }
+
+// Checked when the person picks it, and again when its app has come up:
+// the registry may change in between.
+LOGOS_TEST(an_app_that_changed_while_coming_up_gets_nothing)
+{
+    World w;
+    IntentBroker::Ticket t;
+    activating(w, &t);
+    json signer2 = signerUiPackage();
+    signer2["version"] = "2.0.0";
+    reinstall(w, {walletPackage(), signer2});
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+LOGOS_TEST(a_link_cannot_reach_an_app_that_dropped_web_while_coming_up)
+{
+    World w(Attention::Interactive);
+    w.registry.registerLinkRequester("basecamp_link", {});
+    const auto shareUi = [](bool web) {
+        return pkg("share_ui", "ui_qml", json::array({json{{"intent", "share.text"}, {"web", web}}}));
+    };
+    reinstall(w, {walletPackage(), shareUi(true)});
+    w.broker.submit("basecamp_link", "share.text", json::object(), false, /*fromPresenter=*/true, w.now);
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "share_ui"}}, w.now);
+    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "activate").size(), std::size_t(1));
+
+    reinstall(w, {walletPackage(), shareUi(false)});
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("share_ui", "share_ui_backend", w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    w.advance(400);
+    const auto results = workOfKind(w.broker.takeWork(), "result");
+    LOGOS_ASSERT_EQ(results.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(results[0]["result"]["error"].get<std::string>(), err::unavailable);
+}
+
+// An answer is held to what the provider declared when it was given the
+// request, not to metadata installed since.
+LOGOS_TEST(an_answer_is_checked_against_the_result_declared_at_delivery)
+{
+    World w(Attention::Headless);
+    const auto stamp = [](const char* field) {
+        return pkg("stamp_module", "core", json::array({json{
+            {"intent", "stamp.make"},
+            {"result", json::array({json{{"name", field}, {"type", "string"}, {"required", true}}})},
+        }}));
+    };
+    const json asker = pkg("asker_module", "core", json::array(), intentList({"stamp.make"}));
+    reinstall(w, {walletPackage(), asker, stamp("signature")});
+    w.broker.configureProvider("stamp.make", "stamp_module");
+    const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+    const auto d = ofKind(w.broker.takeEffects(), K::Deliver).at(0).dispatchId;
+
+    reinstall(w, {walletPackage(), asker, stamp("approvalId")});
+    LOGOS_ASSERT_TRUE(w.broker.respond("stamp_module", d, true, json{{"signature", "ab"}}, "", w.now));
+    LOGOS_ASSERT_EQ(w.settledError(t, "asker_module"), std::string());
+}

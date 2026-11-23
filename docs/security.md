@@ -2,7 +2,7 @@
 
 The broker used to run inside Basecamp's process. As a module it is reachable
 like any other, so the protections that came free there are built in here.
-Numbers in parentheses refer to the gaps in `generic-intents-design.md`.
+Numbers in parentheses refer to the gaps in [`design.md`](design.md#security).
 
 Threat model: the presenter (the host frontend holding the secret) is trusted.
 Every installed package is not — its `metadata.json`, its module calling any

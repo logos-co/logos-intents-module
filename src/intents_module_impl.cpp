@@ -124,10 +124,9 @@ LogosShutdown IntentsModuleImpl::aboutToUnload()
     return LogosShutdown::Synchronous;
 }
 
-std::string IntentsModuleImpl::request(const std::string& intent, const std::string& params_json,
-                                       const std::string& click_token)
+std::string IntentsModuleImpl::request(const std::string& intent, const std::string& params_json)
 {
-    return guarded("request", [&] { return m_state->service->request(intent, params_json, click_token); });
+    return guarded("request", [&] { return m_state->service->request(intent, params_json); });
 }
 
 std::string IntentsModuleImpl::result(const std::string& handle, const std::string& receipt)
@@ -146,9 +145,9 @@ std::string IntentsModuleImpl::respond(const std::string& dispatch, bool ok,
     return guarded("respond", [&] { return m_state->service->respond(dispatch, ok, data_json, error); });
 }
 
-std::string IntentsModuleImpl::claim(const std::string& options_json)
+std::string IntentsModuleImpl::claim()
 {
-    return guarded("claim", [&] { return m_state->service->claim(options_json); });
+    return guarded("claim", [&] { return m_state->service->claim(); });
 }
 
 std::string IntentsModuleImpl::next_work(const std::string& secret)
@@ -160,24 +159,6 @@ std::string IntentsModuleImpl::answer(const std::string& secret, const std::stri
                                       const std::string& answer_json)
 {
     return guarded("answer", [&] { return m_state->service->answer(secret, work_id, answer_json); });
-}
-
-std::string IntentsModuleImpl::register_click_token(const std::string& secret, const std::string& token,
-                                                    const std::string& app, const std::string& intent)
-{
-    return guarded("registerClickToken", [&] { return m_state->service->registerClickToken(secret, token, app, intent); });
-}
-
-std::string IntentsModuleImpl::backend_registered(const std::string& secret, const std::string& app,
-                                                  const std::string& module, const std::string& instance)
-{
-    return guarded("backendRegistered",
-                   [&] { return m_state->service->backendRegistered(secret, app, module, instance); });
-}
-
-std::string IntentsModuleImpl::backend_unregistered(const std::string& secret, const std::string& app)
-{
-    return guarded("backendUnregistered", [&] { return m_state->service->backendUnregistered(secret, app); });
 }
 
 std::string IntentsModuleImpl::set_installed(const std::string& secret, const std::string& packages_json)

@@ -3,17 +3,16 @@
 > [!WARNING]
 > **Work in progress — not finished, not released.** The API and the contracts
 > can still change. Basecamp runs it only behind `--intents-module`, in
-> development builds. Still missing: a pending-list UI in Basecamp (a request
-> with no click behind it waits there unseen), follow-up requests from a
-> provider after a hand-off, `basecamp://` links through the module, and apps
+> development builds. Still missing: a pending-list UI in Basecamp (until then
+> it opens every request), follow-up requests from a provider after a hand-off, `basecamp://` links through the module, and apps
 > ported onto it. Providers and requesters also need unreleased changes in
 > `logos-module-builder`, `logos-view-module` and `logos-view-module-runtime`.
 > Don't depend on it yet.
 
 `intents_module` routes requests that need a person — approve a signature, pick a
 wallet, open an app — from the module that asks to the module that provides,
-and keeps the result for the requester alone. It is the broker that used to live
-inside Basecamp (`IntentBroker`, `IntentRegistry`), as a core module.
+and keeps the result for the requester alone. It knows modules and intents
+only: the presenter decides how and when to reach the person.
 
 The shell hosts it, like `capability_module`: Basecamp starts it in Basecamp, the
 `logoscore` daemon for `logosctl` and CLI apps. Apps never list it as a
@@ -34,7 +33,7 @@ under `interface_dependencies` and bind it to `intents_module`. Frontends use
 
 A module is only ever itself. One named like the shell, the link requester or
 an installed app is refused: the shell and links ask through the presenter, and
-an app only through the backend the presenter registered for it.
+an app through its backend module.
 
 ### Asking
 
@@ -42,8 +41,7 @@ an app only through the backend the presenter registered for it.
 auto intents = modules().bind_intents("intents_module");
 // subscribe to settled() first
 auto t = json::parse(intents.request("signing.approve",
-                                     R"({"service":"signer_manager_module","handle":"smh_3f2a"})",
-                                     clickTokenFromMyView));
+                                     R"({"service":"signer_manager_module","handle":"smh_3f2a"})"));
 if (!t["ok"]) { /* t["error"]: not_declared, or failed when over the rate */ }
 // on settled(handle) for t["handle"], and once right away in case it already settled:
 auto r = json::parse(intents.result(t["handle"], t["receipt"]));
@@ -61,10 +59,10 @@ Errors in a result: `unavailable` (no provider, not allowed, or the provider wen
 away — deliberately indistinguishable), `bad_request`, `cancelled`, `timeout`,
 `failed`.
 
-With an `interactive` presenter a request with no click token behind it waits
-in the pending list until the person opens it (up to 30 minutes), whether or
-not anything provides it: nothing about what is installed is decided before
-then.
+Every request waits as pending until the presenter opens it (up to 30
+minutes), whether or not anything provides it: nothing about what is installed
+is decided before then. Basecamp opens it at once when the person just clicked
+in the requesting app's screen.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
 values); 16 requests open and 4 in the pending list at a time; results are kept
@@ -106,16 +104,16 @@ Nothing it already started (a transfer, a signature) is stopped or undone, so
 a provider that acts on a delivery should have the person confirm in its own
 view first. There is no cancellation protocol for providers yet.
 
-An app's provider is its backend: the presenter tells `intents_module` which
-backend it registered for which app, and only that backend may respond. With
-logos-module-builder, an app whose metadata lists `provides` and has a
-`"backend": "module"` backend gets `deliver` on that backend: implement
+An app asks and answers through its backend module, which declares the app's
+`uses` and `provides` in its own `metadata.json`. With logos-module-builder, an
+app with a `"backend": "module"` backend gets them copied there, and its
+backend gets `deliver`: implement
 `QString deliver(const QString& dispatch, const QString& intent, const QString& paramsJson, const QString& requester)`
 in the backend class; the generated glue already refuses anyone but
 `intents_module`.
 
-A core module that asks or provides ships its `metadata.json` (the builder adds
-it when `provides` or `uses` is set): `set_installed` reads declarations from
+A module that asks or provides ships its `metadata.json` (the builder adds it
+when `provides` or `uses` is set): `set_installed` reads declarations from
 there.
 
 ### Presenting
@@ -125,22 +123,17 @@ and before the daemon accepts `logosctl` calls, then declares itself and the
 installed packages:
 
 ```
-claim({"attention": "interactive" | "immediate"}) -> { ok, secret }
-declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module, instance) ...
+claim() -> { ok, secret }
+declare_shell(secret, {...}); set_installed(secret, [...])
 ```
-
-- `interactive`: a request pops up only with a click token behind it;
-  otherwise it waits in the pending list. Basecamp's mode once its Activity
-  view shows that list; until then Basecamp claims `immediate`.
-- `immediate` (a terminal presenter, and Basecamp for now): everything is shown
-  at once.
 
 Until a presenter claims, nobody can be asked: every request is `unavailable`.
 
-`instance` names one run of the backend. Registering the same app, module and
-instance again changes nothing; another instance, or an empty one, is a new
-backend, and whatever was dispatched to the one before fails. The host
-unregisters a backend when that run stops.
+The presenter decides when to interrupt the person. A new request comes as a
+`pending` item and waits until the presenter opens it: a terminal presenter
+opens everything; Basecamp opens a request when the person just clicked in that
+module's screen, once per click, and until its Activity view shows the pending
+list it opens everything.
 
 The presenter pulls its work with `next_work(secret)` when `work_available`
 fires, and answers items with `answer(secret, id, {...})`:
@@ -148,16 +141,21 @@ fires, and answers items with `answer(secret, id, {...})`:
 | Work item | Answer |
 |---|---|
 | `choose` {dispatch, intent, requester, providers} | `{"action":"choose","provider":m}` or `{"action":"cancel"}` |
-| `activate` {app} | `{"action":"activated"}` (then `backend_registered`) or `{"action":"failed"}` |
-| `pending` {dispatch, intent, requester} | `{"action":"open"}` (that is the click) or `{"action":"dismiss"}` |
+| `pending` {dispatch, intent, requester} | `{"action":"open"}` or `{"action":"dismiss"}` |
 | `deliver` {dispatch, intent, params, requester} — the shell is the provider | `{"action":"respond","ok":b,"data":d,"error":e}` |
-| `present` {app}, `offer_install` {intent}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
+| `present` {provider}, `offer_install` {intent}, `completed` {...}, `result` {handle, result}, `dismiss` {work} | none |
+
+Before answering `choose`, the presenter makes sure the chosen module runs:
+Basecamp starts the app or module the person picked. A provider that isn't
+running fails as `unavailable`. `present` and `completed` name the module
+delivered to; the presenter raises it, and later returns the person, only if
+that module has a screen.
 
 An item that ends before the presenter pulled it is withdrawn from the queue;
 `dismiss` is only for items the presenter already has. A pick of a provider that
-changed while the chooser was open is taken, and a new `choose` follows. Install offers come only
-for clicked or opened requests, once per intent a minute; the presenter finds
-what could be installed in its own catalogue.
+changed while the chooser was open is taken, and a new `choose` follows.
+Install offers come only for opened requests, once per intent a minute; the
+presenter finds what could be installed in its own catalogue.
 
 Package and module names in work items are plain (`[A-Za-z0-9_.-]`, the
 registry refuses anything else), and requester and display names are stripped of

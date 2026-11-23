@@ -1,7 +1,7 @@
 #pragma once
 
 // Everything intents_module does, behind its public methods: who is calling,
-// the presenter's secret, click tokens, and the lock around the broker.
+// the presenter's secret, and the lock around the broker.
 //
 // Kept apart from the module class so tests can drive it with a fake clock and
 // a fake transport, and so the module's header — which IS its API — stays the
@@ -42,9 +42,8 @@ public:
     IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config = {},
                    Loader load = loadPackages);
 
-    // ── Requesters: app backends and core modules ───────────────────────
-    std::string request(const std::string& intent, const std::string& paramsJson,
-                        const std::string& clickToken);
+    // ── Requesters: any module, an app's backend included ──────────────
+    std::string request(const std::string& intent, const std::string& paramsJson);
     std::string result(const std::string& handle, const std::string& receipt);
     std::string cancel(const std::string& handle, const std::string& receipt);
 
@@ -53,15 +52,10 @@ public:
                         const std::string& error);
 
     // ── Presenter: the host, once, then with the secret ────────────────
-    std::string claim(const std::string& optionsJson);
+    std::string claim();
     std::string nextWork(const std::string& secret);
     std::string answer(const std::string& secret, const std::string& workId,
                        const std::string& answerJson);
-    std::string registerClickToken(const std::string& secret, const std::string& token,
-                                   const std::string& app, const std::string& intent);
-    std::string backendRegistered(const std::string& secret, const std::string& app,
-                                  const std::string& module, const std::string& instance = {});
-    std::string backendUnregistered(const std::string& secret, const std::string& app);
     std::string setInstalled(const std::string& secret, const std::string& packagesJson);
     std::string declareShell(const std::string& secret, const std::string& shellJson);
     std::string shellRequest(const std::string& secret, const std::string& intent,
@@ -70,29 +64,14 @@ public:
     // Deadlines, and `settled` events held back until their request has returned.
     void tick();
 
-    static constexpr std::int64_t kClickTokenMs = 2000;
-
 private:
-    struct ClickToken {
-        std::string token;
-        std::string intent;   // empty: any intent
-        std::int64_t expires = 0;
-    };
-
-    // Who is calling, as a requester: an app through its registered backend,
-    // or a module under its own name. Empty for anything else, including a
-    // module that has the name of the shell, the link requester or an app.
-    struct Requester {
-        std::string name;
-        bool viaBackend = false;
-    };
-    Requester requesterForCaller();
+    // The calling module's name, as a requester. Empty for anything else,
+    // including a module named like the shell, the link requester or an app.
+    std::string requesterForCaller();
 
     // Host caller holding the secret. Logs and returns false otherwise.
     bool presenterCall(const std::string& secret, const char* method);
     json declareShellLocked(const std::string& shellJson);
-    bool consumeClickToken(const Requester& who, const std::string& token,
-                           const std::string& intent, std::int64_t now);
     // A refusal worth logging, at most once a minute per caller.
     void logRefusal(const std::string& caller, const std::string& line, std::int64_t now);
 
@@ -113,7 +92,6 @@ private:
     IntentBroker m_broker;
     std::string m_secret;
     bool m_claimed = false;
-    std::map<std::string, ClickToken> m_clickTokens;   // app -> its one live token
     std::vector<Effect> m_deferredSettled;
     std::map<std::string, std::int64_t> m_lastRefusalLog;
 };

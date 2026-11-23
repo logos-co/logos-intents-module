@@ -340,6 +340,12 @@ void IntentRegistry::ingest(const std::string& name, const json& metadata,
 
     const std::string type = stringAt(metadata, "type");
     if (type != "core" && type != "ui_qml") return;
+    // An app's screen is only a name here: its backend asks and answers for it,
+    // with the intents in the backend's own metadata.json.
+    if (type == "ui_qml") {
+        m_types[name] = type;
+        return;
+    }
 
     std::vector<Provide> provides = parseProvides(findKey(metadata, "provides"), name);
     const std::vector<std::string> uses = parseUses(findKey(metadata, "uses"), name);

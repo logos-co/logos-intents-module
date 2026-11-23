@@ -28,11 +28,10 @@ public:
     IntentsModuleImpl();
     ~IntentsModuleImpl();
 
-    // ── Requesters: app backends and core modules ───────────────────────
+    // ── Requesters: any module, an app's backend included ──────────────
     // Ask for `intent`. Answers at once with { ok, handle, receipt }; the
     // outcome comes later: wait for `settled(handle)`, then call result().
-    // `click_token` is what the app's view got from logos.clickToken(), or "".
-    std::string request(const std::string& intent, const std::string& params_json, const std::string& click_token);
+    std::string request(const std::string& intent, const std::string& params_json);
 
     // { ok, state: "pending" } or { ok, state: "settled", result: { ok, data, error } }.
     std::string result(const std::string& handle, const std::string& receipt);
@@ -46,18 +45,11 @@ public:
 
     // ── Presenter: the frontend that started this module ────────────────
     // Once, by the host, before any app loads. Answers { ok, secret }.
-    // options: { "attention": "interactive" | "immediate" }.
-    std::string claim(const std::string& options_json);
+    std::string claim();
 
     std::string next_work(const std::string& secret);
 
     std::string answer(const std::string& secret, const std::string& work_id, const std::string& answer_json);
-
-    std::string register_click_token(const std::string& secret, const std::string& token, const std::string& app, const std::string& intent);
-
-    std::string backend_registered(const std::string& secret, const std::string& app, const std::string& module, const std::string& instance);
-
-    std::string backend_unregistered(const std::string& secret, const std::string& app);
 
     // [{ name, installDir, displayName?, iconSource? }]
     std::string set_installed(const std::string& secret, const std::string& packages_json);

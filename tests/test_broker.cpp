@@ -16,16 +16,25 @@ namespace {
 
 using K = Effect::Kind;
 
-// wallet_module asks for signing.approve; signer_ui (an app) and
-// cli_signer (a core module) provide it, signer_ui with declared params.
+// What the test's presenter does with a request waiting as pending.
+enum class Presenter {
+    None,              // nobody has claimed
+    OpensEverything,   // as a terminal does, and Basecamp until its Activity view
+    OpensWhenTold,     // leaves it in the pending list for the test to open
+};
+
+// wallet_module asks for signing.approve; signer_ui_backend (an app's backend)
+// and cli_signer provide it, signer_ui_backend with declared params.
 struct World {
     IntentRegistry registry;
     IntentBroker broker;
+    Presenter presenter;
     std::int64_t now = 1000;
+    json held = json::array();   // work the presenter pulled and hasn't handed out
 
-    explicit World(Attention attention = Attention::Immediate, bool twoProviders = false,
+    explicit World(Presenter presenter = Presenter::OpensEverything, bool twoProviders = false,
                    BrokerConfig config = {})
-        : broker(registry, test::counterIds(), config)
+        : broker(registry, test::counterIds(), config), presenter(presenter)
     {
         json signerProvides = json::array({json{
             {"intent", "signing.approve"},
@@ -35,17 +44,45 @@ struct World {
         registry.ingest("wallet_module", pkg("wallet_module", "core", json::array(),
                                              intentList({"signing.approve", "basecamp.settings.open",
                                                          "nobody.provides"})), "", "");
-        registry.ingest("signer_ui", pkg("signer_ui", "ui_qml", signerProvides), "Signer", "");
+        registry.ingest("signer_ui_backend", pkg("signer_ui_backend", "core", signerProvides), "Signer", "");
         if (twoProviders)
             registry.ingest("cli_signer", pkg("cli_signer", "core", intentList({"signing.approve"})), "", "");
-        broker.setAttention(attention);
+        if (presenter != Presenter::None) broker.setClaimed();
     }
 
     IntentBroker::Ticket ask(const std::string& requester = "wallet_module",
                              const std::string& intent = "signing.approve",
-                             json params = json{{"handle", "h1"}}, bool clicked = false)
+                             json params = json{{"handle", "h1"}})
     {
-        return broker.submit(requester, intent, params, clicked, /*fromPresenter=*/false, now);
+        const auto t = broker.submit(requester, intent, params, /*fromPresenter=*/false, now);
+        if (presenter == Presenter::OpensEverything) pull();
+        return t;
+    }
+
+    // The presenter's work. One that opens everything pulls at once and opens
+    // each pending request; the rest is handed out here.
+    json takeWork()
+    {
+        pull();
+        json out = std::move(held);
+        held = json::array();
+        return out;
+    }
+
+    void pull()
+    {
+        for (json items = broker.takeWork(); !items.empty(); items = broker.takeWork()) {
+            bool opened = false;
+            for (json& item : items) {
+                if (presenter == Presenter::OpensEverything && item.value("kind", "") == "pending") {
+                    broker.answer(item["id"].get<std::string>(), json{{"action", "open"}}, now);
+                    opened = true;
+                } else {
+                    held.push_back(std::move(item));
+                }
+            }
+            if (!opened) break;
+        }
     }
 
     std::string settledError(const IntentBroker::Ticket& t, const std::string& requester = "wallet_module")
@@ -65,7 +102,7 @@ struct World {
 // The person picks `provider` in the chooser on screen.
 void choose(World& w, const std::string& provider)
 {
-    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    const auto shown = workOfKind(w.takeWork(), "choose");
     w.broker.answer(shown.at(0)["id"].get<std::string>(),
                     json{{"action", "choose"}, {"provider", provider}}, w.now);
 }
@@ -101,19 +138,38 @@ LOGOS_TEST(nothing_provides_it_is_unavailable_but_only_after_the_floor)
 // Until a presenter claims, nobody can be asked: nothing is shown or delivered.
 LOGOS_TEST(nothing_is_delivered_before_a_presenter_claims)
 {
-    World w(Attention::Unclaimed, /*twoProviders=*/true);
+    World w(Presenter::None, /*twoProviders=*/true);
     const auto t = w.ask();
     LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    LOGOS_ASSERT_TRUE(w.broker.takeWork().empty());
+    LOGOS_ASSERT_TRUE(w.takeWork().empty());
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+// The presenter is told to raise the module delivered to, and when it is done;
+// it acts only for a module with a screen.
+LOGOS_TEST(a_delivery_to_another_module_is_presented_and_completed)
+{
+    World w;
+    const auto t = w.ask();
+    const auto d = pick(w, "signer_ui_backend");
+    const auto present = workOfKind(w.takeWork(), "present");
+    LOGOS_ASSERT_EQ(present.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(present[0]["provider"].get<std::string>(), std::string("signer_ui_backend"));
+
+    LOGOS_ASSERT_TRUE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json("signed"), "", w.now));
+    LOGOS_ASSERT_EQ(w.broker.result("wallet_module", t.handle, t.receipt)["result"]["data"].get<std::string>(),
+                    std::string("signed"));
+    const auto completed = workOfKind(w.takeWork(), "completed");
+    LOGOS_ASSERT_EQ(completed.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(completed[0]["by"].get<std::string>(), std::string("provider"));
 }
 
 LOGOS_TEST(one_provider_still_asks_the_person)
 {
     World w;
     w.ask();
-    const json work = w.broker.takeWork();
+    const json work = w.takeWork();
     const auto choose = workOfKind(work, "choose");
     LOGOS_ASSERT_EQ(choose.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(choose[0]["providers"].size(), std::size_t(1));
@@ -122,56 +178,30 @@ LOGOS_TEST(one_provider_still_asks_the_person)
 
 LOGOS_TEST(only_one_choice_is_on_screen_and_the_next_follows)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto first = w.ask();
     w.now += 1;
     w.ask();
-    auto choose = workOfKind(w.broker.takeWork(), "choose");
+    auto choose = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(choose.size(), std::size_t(1));
 
     LOGOS_ASSERT_TRUE(w.broker.answer(choose[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now));
     LOGOS_ASSERT_EQ(w.settledError(first), err::cancelled);
-    choose = workOfKind(w.broker.takeWork(), "choose");
+    choose = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(choose.size(), std::size_t(1));
 }
 
 LOGOS_TEST(a_choice_must_be_one_of_the_providers_shown)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     w.ask();
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
+    const auto choose = workOfKind(w.takeWork(), "choose");
     const std::string id = choose[0]["id"].get<std::string>();
     LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "choose"}, {"provider", "wallet_module"}}, w.now));
     LOGOS_ASSERT_TRUE(w.broker.answer(id, json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
     LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
     // Answered once; a second answer is refused.
     LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
-}
-
-LOGOS_TEST(an_app_provider_is_activated_then_delivered_to_its_backend)
-{
-    World w;
-    const auto t = w.ask();
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
-    w.broker.answer(choose[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const json work = w.broker.takeWork();
-    LOGOS_ASSERT_EQ(workOfKind(work, "activate").size(), std::size_t(1));
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
-    const auto delivers = ofKind(w.broker.takeEffects(), K::Deliver);
-    LOGOS_ASSERT_EQ(delivers.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(delivers[0].module, std::string("signer_ui_backend"));
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "present").size(), std::size_t(1));
-
-    LOGOS_ASSERT_TRUE(w.broker.respond("signer_ui_backend", delivers[0].dispatchId, true, json("signed"), "", w.now));
-    LOGOS_ASSERT_EQ(w.broker.result("wallet_module", t.handle, t.receipt)["result"]["data"].get<std::string>(),
-                    std::string("signed"));
-    // The frontend is told, and decides whether to take the person back.
-    const auto completed = workOfKind(w.broker.takeWork(), "completed");
-    LOGOS_ASSERT_EQ(completed.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(completed[0]["by"].get<std::string>(), std::string("provider"));
 }
 
 namespace {
@@ -193,7 +223,7 @@ json walletPackage()
 
 json signerUiPackage()
 {
-    return pkg("signer_ui", "ui_qml", json::array({json{
+    return pkg("signer_ui_backend", "core", json::array({json{
         {"intent", "signing.approve"},
         {"params", json::array({json{{"name", "handle"}, {"type", "string"}, {"required", true}}})},
     }}));
@@ -210,9 +240,9 @@ json webProvider(const std::string& name, bool web)
 // one the person picked: they're asked again.
 LOGOS_TEST(a_provider_changed_under_the_chooser_is_offered_again)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     w.ask();
-    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    const auto shown = workOfKind(w.takeWork(), "choose");
     json changed = pkg("cli_signer", "core", intentList({"signing.approve"}));
     changed["version"] = "2.0.0";
     reinstall(w, {walletPackage(), signerUiPackage(), changed});
@@ -220,7 +250,7 @@ LOGOS_TEST(a_provider_changed_under_the_chooser_is_offered_again)
     LOGOS_ASSERT_TRUE(w.broker.answer(shown[0]["id"].get<std::string>(),
                                       json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
     LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    const auto again = workOfKind(w.broker.takeWork(), "choose");
+    const auto again = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(again.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(again[0]["dispatch"].get<std::string>(), shown[0]["dispatch"].get<std::string>());
 
@@ -231,103 +261,44 @@ LOGOS_TEST(a_provider_changed_under_the_chooser_is_offered_again)
 
 LOGOS_TEST(a_queued_chooser_shows_the_providers_of_the_moment_it_comes_up)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     w.ask();
     w.now += 1;
     w.ask();
-    const auto first = workOfKind(w.broker.takeWork(), "choose");
+    const auto first = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(first.size(), std::size_t(1));
     reinstall(w, {walletPackage(), signerUiPackage()});   // cli_signer uninstalled
 
     w.broker.answer(first[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now);
-    const auto next = workOfKind(w.broker.takeWork(), "choose");
+    const auto next = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(next.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(next[0]["providers"].size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(next[0]["providers"][0]["module"].get<std::string>(), std::string("signer_ui"));
+    LOGOS_ASSERT_EQ(next[0]["providers"][0]["module"].get<std::string>(), std::string("signer_ui_backend"));
 }
 
 // A link reaches only providers that opted in, at the moment the person picks.
 LOGOS_TEST(a_link_request_cannot_go_to_a_provider_that_dropped_web)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     w.registry.registerLinkRequester("basecamp_link", {});
     reinstall(w, {walletPackage(), signerUiPackage(), webProvider("share_a", true), webProvider("share_b", true)});
-    w.broker.submit("basecamp_link", "share.text", json::object(), false, /*fromPresenter=*/true, w.now);
-    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    w.broker.submit("basecamp_link", "share.text", json::object(), /*fromPresenter=*/true, w.now);
+    const auto shown = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(shown[0]["providers"].size(), std::size_t(2));
 
     reinstall(w, {walletPackage(), signerUiPackage(), webProvider("share_a", false), webProvider("share_b", true)});
     LOGOS_ASSERT_TRUE(w.broker.answer(shown[0]["id"].get<std::string>(),
                                       json{{"action", "choose"}, {"provider", "share_a"}}, w.now));
     LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    const auto again = workOfKind(w.broker.takeWork(), "choose");
+    const auto again = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(again.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(again[0]["providers"].size(), std::size_t(1));
     LOGOS_ASSERT_EQ(again[0]["providers"][0]["module"].get<std::string>(), std::string("share_b"));
 }
 
-// Nothing may raise an app once no request waits on it.
-LOGOS_TEST(an_activation_nobody_waits_for_is_taken_back)
-{
-    World w;
-    const auto unpulled = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    w.broker.cancel("wallet_module", unpulled.handle, unpulled.receipt, w.now);
-    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "activate").empty());
-
-    // Pulled: the presenter is told to take it down, and it can't be answered.
-    const auto pulled = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const auto activate = workOfKind(w.broker.takeWork(), "activate");
-    LOGOS_ASSERT_EQ(activate.size(), std::size_t(1));
-    w.broker.cancel("wallet_module", pulled.handle, pulled.receipt, w.now);
-    const auto dismiss = workOfKind(w.broker.takeWork(), "dismiss");
-    LOGOS_ASSERT_EQ(dismiss.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(dismiss[0]["work"].get<std::string>(), activate[0]["id"].get<std::string>());
-    LOGOS_ASSERT_FALSE(w.broker.answer(activate[0]["id"].get<std::string>(), json{{"action", "failed"}}, w.now));
-}
-
-LOGOS_TEST(an_activation_stays_while_a_request_still_waits_on_it)
-{
-    World w;
-    const auto first = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    w.now += 1;
-    const auto second = w.ask();
-    const json work = w.broker.takeWork();
-    const auto activate = workOfKind(work, "activate");
-    LOGOS_ASSERT_EQ(activate.size(), std::size_t(1));
-    w.broker.answer(workOfKind(work, "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "activate").empty());   // asked once
-
-    w.broker.cancel("wallet_module", first.handle, first.receipt, w.now);
-    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "dismiss").empty());
-    w.broker.cancel("wallet_module", second.handle, second.receipt, w.now);
-    const auto dismiss = workOfKind(w.broker.takeWork(), "dismiss");
-    LOGOS_ASSERT_EQ(dismiss.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(dismiss[0]["work"].get<std::string>(), activate[0]["id"].get<std::string>());
-}
-
-LOGOS_TEST(a_backend_that_comes_up_first_leaves_no_activation_behind)
-{
-    World w;
-    w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
-    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
-    const json work = w.broker.takeWork();
-    LOGOS_ASSERT_TRUE(workOfKind(work, "activate").empty());
-    LOGOS_ASSERT_EQ(workOfKind(work, "present").size(), std::size_t(1));
-}
-
 LOGOS_TEST(only_the_module_delivered_to_may_respond)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto t = w.ask();
     const auto d = pick(w, "cli_signer");
     LOGOS_ASSERT_FALSE(w.broker.respond("wallet_module", d.dispatchId, true, json("forged"), "", w.now));
@@ -335,99 +306,25 @@ LOGOS_TEST(only_the_module_delivered_to_may_respond)
     LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
 }
 
-LOGOS_TEST(a_reloaded_backend_cannot_answer_its_predecessors_request)
+LOGOS_TEST(a_new_request_waits_until_the_presenter_opens_it)
 {
-    World w;
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);
+    World w(Presenter::OpensWhenTold);
     const auto t = w.ask();
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
-    w.broker.answer(choose[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
-
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);   // reload
-    LOGOS_ASSERT_FALSE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json(), "", w.now));
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
-}
-
-// The same run of a backend registered again (a second view of the app)
-// changes nothing; another run starts afresh.
-LOGOS_TEST(registering_the_same_run_of_a_backend_again_changes_nothing)
-{
-    World w;
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run1");
-    const auto t = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run1"));
-    LOGOS_ASSERT_TRUE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json("signed"), "", w.now));
-    LOGOS_ASSERT_EQ(w.settledError(t), std::string());
-
-    const auto u = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const auto e = ofKind(w.broker.takeEffects(), K::Deliver)[0];
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now, "run2"));
-    LOGOS_ASSERT_FALSE(w.broker.respond("signer_ui_backend", e.dispatchId, true, json(), "", w.now));
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(u), err::unavailable);
-}
-
-LOGOS_TEST(unregistering_a_backend_fails_what_it_was_given)
-{
-    World w;
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);
-    const auto t = w.ask();
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
-    w.broker.answer(choose[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    const auto d = ofKind(w.broker.takeEffects(), K::Deliver)[0];
-    w.broker.unregisterBackend("signer_ui", w.now);
-    LOGOS_ASSERT_FALSE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json(), "", w.now));
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
-}
-
-LOGOS_TEST(a_backend_name_that_belongs_to_a_package_is_refused)
-{
-    World w(Attention::Immediate, true);
-    LOGOS_ASSERT_FALSE(w.broker.registerBackend("signer_ui", "cli_signer", w.now));
-    LOGOS_ASSERT_FALSE(w.broker.registerBackend("signer_ui", "basecamp", w.now));
-    LOGOS_ASSERT_FALSE(w.broker.registerBackend("wallet_module", "x_backend", w.now));   // not an app
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
-    w.registry.ingest("other_ui", pkg("other_ui", "ui_qml"), "", "");
-    LOGOS_ASSERT_FALSE(w.broker.registerBackend("other_ui", "signer_ui_backend", w.now));   // serves another app
-}
-
-LOGOS_TEST(interactive_without_a_click_waits_in_the_pending_list)
-{
-    World w(Attention::Interactive);
-    const auto t = w.ask();
-    const json work = w.broker.takeWork();
+    const json work = w.takeWork();
     LOGOS_ASSERT_TRUE(workOfKind(work, "choose").empty());
     const auto pending = workOfKind(work, "pending");
     LOGOS_ASSERT_EQ(pending.size(), std::size_t(1));
 
-    // Opening it is the click.
     LOGOS_ASSERT_TRUE(w.broker.answer(pending[0]["id"].get<std::string>(), json{{"action", "open"}}, w.now));
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "choose").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "choose").size(), std::size_t(1));
     LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
-}
-
-LOGOS_TEST(interactive_with_a_click_pops_up_at_once)
-{
-    World w(Attention::Interactive);
-    w.ask("wallet_module", "signing.approve", json{{"handle", "h"}}, /*clicked=*/true);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "choose").size(), std::size_t(1));
 }
 
 LOGOS_TEST(a_dismissed_or_stale_pending_request_is_cancelled)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     const auto a = w.ask();
-    const auto pending = workOfKind(w.broker.takeWork(), "pending");
+    const auto pending = workOfKind(w.takeWork(), "pending");
     w.broker.answer(pending[0]["id"].get<std::string>(), json{{"action", "dismiss"}}, w.now);
     LOGOS_ASSERT_EQ(w.settledError(a), err::cancelled);
 
@@ -438,7 +335,7 @@ LOGOS_TEST(a_dismissed_or_stale_pending_request_is_cancelled)
 
 LOGOS_TEST(the_pending_list_is_bounded_per_requester)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     for (int i = 0; i < 4; ++i) w.ask();
     const auto fifth = w.ask();
     w.advance(400);
@@ -456,12 +353,11 @@ LOGOS_TEST(open_requests_are_bounded_per_requester)
 
 LOGOS_TEST(params_that_are_not_plain_data_or_miss_the_spec_are_bad_requests)
 {
-    World w(Attention::Immediate);
+    World w(Presenter::OpensEverything);
     const auto notObject = w.ask("wallet_module", "signing.approve", json::array({1}));
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);
     const auto missing = w.ask("wallet_module", "signing.approve", json{{"other", 1}});
-    for (const json& c : workOfKind(w.broker.takeWork(), "choose"))
-        w.broker.answer(c["id"].get<std::string>(), json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
+    for (const json& c : workOfKind(w.takeWork(), "choose"))
+        w.broker.answer(c["id"].get<std::string>(), json{{"action", "choose"}, {"provider", "signer_ui_backend"}}, w.now);
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(notObject), err::badRequest);
     LOGOS_ASSERT_EQ(w.settledError(missing), err::badRequest);
@@ -478,7 +374,7 @@ LOGOS_TEST(an_answer_that_misses_its_declared_result_is_failed)
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
     const auto ask = [&]() {
-        return w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+        return w.broker.submit("asker_module", "stamp.make", json::object(), false, w.now);
     };
     const auto delivered = [&]() { return pick(w, "stamp_module").dispatchId; };
 
@@ -507,7 +403,7 @@ LOGOS_TEST(an_answer_that_misses_its_declared_result_is_failed)
 
 LOGOS_TEST(a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto a = w.ask();
     const auto da = pick(w, "cli_signer");
     w.broker.respond("cli_signer", da.dispatchId, false, json(), "unavailable", w.now);
@@ -521,7 +417,7 @@ LOGOS_TEST(a_provider_cannot_send_back_a_broker_only_code_or_a_bad_payload)
 
 LOGOS_TEST(the_result_is_for_the_requester_holding_the_receipt)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto t = w.ask();
     const auto d = pick(w, "cli_signer");
     w.broker.respond("cli_signer", d.dispatchId, true, json("secret-signature"), "", w.now);
@@ -546,7 +442,7 @@ LOGOS_TEST(the_result_is_for_the_requester_holding_the_receipt)
 
 LOGOS_TEST(a_provider_that_never_takes_the_delivery_times_out)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto t = w.ask();
     const auto d = pick(w, "cli_signer");
     w.broker.deliveryOutcome(d.dispatchId, /*reached=*/true, /*accepted=*/false, w.now);
@@ -556,7 +452,7 @@ LOGOS_TEST(a_provider_that_never_takes_the_delivery_times_out)
 
 LOGOS_TEST(an_unreachable_provider_is_unavailable)
 {
-    World w(Attention::Immediate, true);
+    World w(Presenter::OpensEverything, true);
     const auto t = w.ask();
     const auto d = pick(w, "cli_signer");
     w.broker.deliveryOutcome(d.dispatchId, /*reached=*/false, false, w.now);
@@ -566,9 +462,9 @@ LOGOS_TEST(an_unreachable_provider_is_unavailable)
 
 LOGOS_TEST(the_shell_answers_its_own_intents_through_the_presenter)
 {
-    World w(Attention::Interactive);
-    const auto t = w.ask("wallet_module", "basecamp.settings.open", json::object(), /*clicked=*/true);
-    const auto deliver = workOfKind(w.broker.takeWork(), "deliver");
+    World w;
+    const auto t = w.ask("wallet_module", "basecamp.settings.open", json::object());
+    const auto deliver = workOfKind(w.takeWork(), "deliver");
     LOGOS_ASSERT_EQ(deliver.size(), std::size_t(1));
     LOGOS_ASSERT_TRUE(w.broker.answer(deliver[0]["id"].get<std::string>(),
                                       json{{"action", "respond"}, {"ok", true}, {"data", json()}}, w.now));
@@ -577,40 +473,38 @@ LOGOS_TEST(the_shell_answers_its_own_intents_through_the_presenter)
 
 LOGOS_TEST(the_shells_own_requests_come_back_as_work)
 {
-    World w(Attention::Interactive, /*twoProviders=*/true);
+    World w(Presenter::OpensWhenTold, /*twoProviders=*/true);
     w.registry.declareShell("basecamp", "basecamp.", {"signing.approve"}, {"basecamp.settings.open"},
                             {}, "Basecamp", "");
-    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, false, /*fromPresenter=*/true, w.now);
-    // A shell request is a click in the shell: no pending list.
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
+    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, /*fromPresenter=*/true, w.now);
+    // The shell's own request is open already: no pending list.
+    const auto choose = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(choose.size(), std::size_t(1));
     w.broker.answer(choose[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now);
-    const auto results = workOfKind(w.broker.takeWork(), "result");
+    const auto results = workOfKind(w.takeWork(), "result");
     LOGOS_ASSERT_EQ(results.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(results[0]["result"]["error"].get<std::string>(), err::cancelled);
     LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Settled).empty());
 }
 
-// The shell's own request is clicked, but sending its params to a package is
-// still the person's choice, even when only one package provides the intent.
+// The shell's own request is open already, but sending its params to a package
+// is still the person's choice, even when only one package provides the intent.
 LOGOS_TEST(a_shell_request_with_one_package_provider_still_asks)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     w.registry.declareShell("basecamp", "basecamp.", {"signing.approve"}, {"basecamp.settings.open"},
                             {}, "Basecamp", "");
-    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, false, /*fromPresenter=*/true, w.now);
-    const json work = w.broker.takeWork();
-    LOGOS_ASSERT_EQ(workOfKind(work, "choose").size(), std::size_t(1));
-    LOGOS_ASSERT_TRUE(workOfKind(work, "activate").empty());
+    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, /*fromPresenter=*/true, w.now);
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "choose").size(), std::size_t(1));
 }
 
 LOGOS_TEST(a_requester_providing_its_own_intent_skips_the_choice)
 {
-    World w(Attention::Interactive, true);
+    World w(Presenter::OpensWhenTold, true);
     w.registry.ingest("self_module", pkg("self_module", "core", intentList({"self.thing"}),
                                          intentList({"self.thing"})), "", "");
     w.ask("self_module", "self.thing", json::object());
-    LOGOS_ASSERT_TRUE(w.broker.takeWork().empty());
+    LOGOS_ASSERT_TRUE(w.takeWork().empty());
     const auto d = ofKind(w.broker.takeEffects(), K::Deliver);
     LOGOS_ASSERT_EQ(d.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(d[0].module, std::string("self_module"));
@@ -618,11 +512,11 @@ LOGOS_TEST(a_requester_providing_its_own_intent_skips_the_choice)
 
 LOGOS_TEST(work_items_show_display_safe_names)
 {
-    World w(Attention::Immediate);
-    w.registry.ingest("evil_ui", pkg("evil_ui", "ui_qml", intentList({"signing.approve"})),
+    World w(Presenter::OpensEverything);
+    w.registry.ingest("evil_ui", pkg("evil_ui", "core", intentList({"signing.approve"})),
                       "Evil\x1b]0;owned\x07 Signer", "");
     w.ask();
-    const auto choose = workOfKind(w.broker.takeWork(), "choose");
+    const auto choose = workOfKind(w.takeWork(), "choose");
     for (const json& p : choose[0]["providers"]) {
         const std::string label = p["displayName"].get<std::string>();
         LOGOS_ASSERT_TRUE(label.find('\x1b') == std::string::npos);
@@ -634,111 +528,103 @@ LOGOS_TEST(work_items_show_display_safe_names)
 
 LOGOS_TEST(a_request_under_the_shells_name_is_the_shells_only_from_the_presenter)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     w.registry.declareShell("basecamp", "basecamp.", {"signing.approve"}, {"basecamp.settings.open"},
                             {}, "Basecamp", "");
-    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, false, /*fromPresenter=*/false, w.now);
-    const json work = w.broker.takeWork();
-    LOGOS_ASSERT_TRUE(workOfKind(work, "activate").empty());
-    LOGOS_ASSERT_EQ(workOfKind(work, "pending").size(), std::size_t(1));
+    w.broker.submit("basecamp", "signing.approve", json{{"handle", "h"}}, /*fromPresenter=*/false, w.now);
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "pending").size(), std::size_t(1));
 }
 
-// Whether anything provides an intent is decided only once the person opens
-// the request, so an app can't find out by asking without a click.
-LOGOS_TEST(unclicked_requests_wait_alike_whatever_is_installed)
+// Whether anything provides an intent is decided only once the request is
+// opened, so a module can't find out by asking.
+LOGOS_TEST(unopened_requests_wait_alike_whatever_is_installed)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     const auto provided = w.ask();
     const auto absent = w.ask("wallet_module", "nobody.provides", json::object());
     w.advance(1000);
     LOGOS_ASSERT_EQ(w.settledError(provided), std::string("<pending>"));
     LOGOS_ASSERT_EQ(w.settledError(absent), std::string("<pending>"));
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "pending").size(), std::size_t(2));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "pending").size(), std::size_t(2));
 }
 
-LOGOS_TEST(an_install_offer_needs_a_click_and_comes_once_a_minute)
+LOGOS_TEST(an_install_offer_comes_once_opened_and_once_a_minute)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     for (int i = 0; i < 3; ++i) w.ask("wallet_module", "nobody.provides", json::object());
-    json work = w.broker.takeWork();
+    json work = w.takeWork();
     LOGOS_ASSERT_TRUE(workOfKind(work, "offer_install").empty());
 
     const auto pending = workOfKind(work, "pending");
     LOGOS_ASSERT_EQ(pending.size(), std::size_t(3));
     for (const json& p : pending)
         w.broker.answer(p["id"].get<std::string>(), json{{"action", "open"}}, w.now);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "offer_install").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "offer_install").size(), std::size_t(1));
 
     w.advance(60 * 1000);
-    w.ask("wallet_module", "nobody.provides", json::object(), /*clicked=*/true);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "offer_install").size(), std::size_t(1));
+    w.ask("wallet_module", "nobody.provides", json::object());
+    const auto later = workOfKind(w.takeWork(), "pending");
+    w.broker.answer(later.at(0)["id"].get<std::string>(), json{{"action", "open"}}, w.now);
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "offer_install").size(), std::size_t(1));
 }
 
 LOGOS_TEST(a_request_withdrawn_before_the_presenter_pulls_leaves_nothing_queued)
 {
-    World w(Attention::Interactive);
+    World w(Presenter::OpensWhenTold);
     for (int i = 0; i < 50; ++i) {
         const auto t = w.ask();
         w.broker.cancel("wallet_module", t.handle, t.receipt, w.now);
     }
-    LOGOS_ASSERT_TRUE(w.broker.takeWork().empty());
+    LOGOS_ASSERT_TRUE(w.takeWork().empty());
 
     // Once pulled, the presenter is told to take it down.
     const auto t = w.ask();
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "pending").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "pending").size(), std::size_t(1));
     w.broker.cancel("wallet_module", t.handle, t.receipt, w.now);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "dismiss").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "dismiss").size(), std::size_t(1));
 }
 
 // Notices give way when the queue is full; an item someone must answer never does.
-LOGOS_TEST(a_flood_of_notices_cannot_push_out_a_chooser)
+LOGOS_TEST(a_flood_of_notices_cannot_push_out_an_item_awaiting_the_person)
 {
-    World w(Attention::Immediate);
+    World w(Presenter::OpensWhenTold);
     const auto victim = w.ask();
-    for (int m = 0; m < 17; ++m) {
-        const std::string requester = "spam" + std::to_string(m);
-        json uses = json::array();
-        for (int i = 0; i < 64; ++i) {
-            const std::string intent = "flood.k" + std::to_string(m * 64 + i);
-            uses.push_back(json{{"intent", intent}});
-        }
-        w.registry.ingest(requester, pkg(requester, "core", json::array(), uses), "", "");
+    std::vector<std::string> flood;
+    for (int i = 0; i < 1088; ++i) flood.push_back("flood.k" + std::to_string(i));
+    w.registry.declareShell("basecamp", "basecamp.", flood, {"basecamp.settings.open"}, {}, "Basecamp", "");
+    for (std::size_t i = 0; i < flood.size(); ++i) {
+        w.broker.submit("basecamp", flood[i], json::object(), /*fromPresenter=*/true, w.now);
+        if (i % 16 == 15) w.advance(400);
     }
-    for (int m = 0; m < 17; ++m) {
-        for (int i = 0; i < 64; ++i) {
-            w.ask("spam" + std::to_string(m), "flood.k" + std::to_string(m * 64 + i), json::object());
-            if (i % 16 == 15) w.advance(400);
-        }
-    }
-    const json work = w.broker.takeWork();
+    const json work = w.takeWork();
     LOGOS_ASSERT_LE(work.size(), std::size_t(1000));
-    const auto choose = workOfKind(work, "choose");
-    LOGOS_ASSERT_EQ(choose.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(choose[0]["dispatch"].get<std::string>(), std::string("id3"));
+    const auto pending = workOfKind(work, "pending");
+    LOGOS_ASSERT_EQ(pending.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(pending[0]["dispatch"].get<std::string>(), std::string("id3"));
     LOGOS_ASSERT_EQ(w.settledError(victim), std::string("<pending>"));
 }
 
 LOGOS_TEST(a_choice_gets_its_full_time_once_shown)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     w.ask();
     w.now += 1;
     const auto second = w.ask();
-    const auto first = workOfKind(w.broker.takeWork(), "choose");
+    const auto first = workOfKind(w.takeWork(), "choose");
     LOGOS_ASSERT_EQ(first.size(), std::size_t(1));
     w.advance(10 * 60 * 1000 - 1000);   // the person takes 9m59s over the first
     w.broker.answer(first[0]["id"].get<std::string>(),
                     json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "choose").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(w.takeWork(), "choose").size(), std::size_t(1));
     w.advance(2000);
     LOGOS_ASSERT_EQ(w.settledError(second), std::string("<pending>"));
 }
 
 LOGOS_TEST(a_malformed_presenter_answer_changes_nothing)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     const auto t = w.ask();
-    const std::string id = workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>();
+    const std::string id = workOfKind(w.takeWork(), "choose")[0]["id"].get<std::string>();
     LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "choose"}, {"provider", 5}}, w.now));
     LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", nullptr}}, w.now));
     LOGOS_ASSERT_FALSE(w.broker.answer(id, json::array(), w.now));
@@ -751,9 +637,9 @@ LOGOS_TEST(a_malformed_presenter_answer_changes_nothing)
 
 LOGOS_TEST(a_shell_answer_reads_a_null_error_as_none)
 {
-    World w(Attention::Interactive);
-    const auto t = w.ask("wallet_module", "basecamp.settings.open", json::object(), /*clicked=*/true);
-    const auto deliver = workOfKind(w.broker.takeWork(), "deliver");
+    World w;
+    const auto t = w.ask("wallet_module", "basecamp.settings.open", json::object());
+    const auto deliver = workOfKind(w.takeWork(), "deliver");
     LOGOS_ASSERT_TRUE(w.broker.answer(deliver[0]["id"].get<std::string>(),
                                       json{{"action", "respond"}, {"ok", true}, {"data", json::object()},
                                            {"error", nullptr}},
@@ -784,7 +670,7 @@ LOGOS_TEST(results_stay_within_each_requesters_byte_budget)
 {
     BrokerConfig config;
     config.maxResultBytesPerRequester = 10 * 1024;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     addSelfStore(w, "hog_module");
     std::vector<IntentBroker::Ticket> tickets;
     for (int i = 0; i < 6; ++i) {
@@ -800,7 +686,7 @@ LOGOS_TEST(results_stay_within_the_global_byte_budget)
 {
     BrokerConfig config;
     config.maxResultBytesTotal = 8 * 1024;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     addSelfStore(w, "hog_a");
     addSelfStore(w, "hog_b");
     for (int i = 0; i < 6; ++i) {
@@ -814,7 +700,7 @@ LOGOS_TEST(open_requests_stay_within_each_requesters_byte_budget)
 {
     BrokerConfig config;
     config.maxOpenBytesPerRequester = 4 * 1024;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     const json big{{"handle", std::string(3000, 'a')}};
     const auto first = w.ask("wallet_module", "signing.approve", big);
     const auto second = w.ask("wallet_module", "signing.approve", big);
@@ -824,16 +710,16 @@ LOGOS_TEST(open_requests_stay_within_each_requesters_byte_budget)
 }
 
 // Results the presenter never pulls can't pile up without end, and can't push
-// out a chooser waiting on the person.
+// out a request waiting on the person.
 LOGOS_TEST(the_work_queue_stays_bounded_when_the_presenter_stops_pulling)
 {
-    World w(Attention::Immediate);
+    World w(Presenter::OpensWhenTold);
     w.ask();
     for (int i = 0; i < 3000; ++i)
-        w.broker.submit("basecamp", "nobody.provides", json::object(), true, /*fromPresenter=*/true, w.now);
-    const json work = w.broker.takeWork();
+        w.broker.submit("basecamp", "nobody.provides", json::object(), /*fromPresenter=*/true, w.now);
+    const json work = w.takeWork();
     LOGOS_ASSERT_LE(work.size(), std::size_t(1000));
-    LOGOS_ASSERT_EQ(workOfKind(work, "choose").size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(work, "pending").size(), std::size_t(1));
 }
 
 // A refusal waiting out its floor holds no open-request slot.
@@ -841,7 +727,7 @@ LOGOS_TEST(the_open_request_limit_holds_while_refusals_wait_out_their_floor)
 {
     BrokerConfig config;
     config.maxOpenTotal = 8;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     std::vector<IntentBroker::Ticket> over;
     for (int i = 0; i < 12; ++i) {
         const auto t = w.ask();
@@ -863,7 +749,7 @@ LOGOS_TEST(refusals_waiting_out_their_floor_are_bounded)
 {
     BrokerConfig config;
     config.maxOpenTotal = 2;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     w.ask();
     w.ask();
     const auto held = w.ask();
@@ -879,7 +765,7 @@ LOGOS_TEST(requests_beyond_the_rate_wait_for_tokens)
     BrokerConfig config;
     config.rateBurst = 3;
     config.ratePerSecond = 1;
-    World w(Attention::Immediate, false, config);
+    World w(Presenter::OpensEverything, false, config);
     for (int i = 0; i < 3; ++i) LOGOS_ASSERT_TRUE(w.broker.admit("wallet_module", w.now));
     LOGOS_ASSERT_FALSE(w.broker.admit("wallet_module", w.now));
     LOGOS_ASSERT_TRUE(w.broker.admit("other_module", w.now));   // per requester
@@ -903,7 +789,7 @@ LOGOS_TEST(an_answer_is_checked_against_every_declared_type)
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
     const auto answered = [&](const json& data) {
-        const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+        const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, w.now);
         const auto d = pick(w, "stamp_module").dispatchId;
         w.broker.respond("stamp_module", d, true, data, "", w.now);
         return w.settledError(t, "asker_module");
@@ -931,7 +817,7 @@ LOGOS_TEST(params_of_the_wrong_declared_type_are_bad_requests)
     }})), "", "");
     w.registry.ingest("asker_module", pkg("asker_module", "core", json::array(), intentList({"stamp.make"})), "", "");
     const auto ask = [&](const json& params) {
-        const auto t = w.broker.submit("asker_module", "stamp.make", params, false, false, w.now);
+        const auto t = w.broker.submit("asker_module", "stamp.make", params, false, w.now);
         choose(w, "stamp_module");
         return t;
     };
@@ -947,68 +833,12 @@ LOGOS_TEST(params_of_the_wrong_declared_type_are_bad_requests)
     LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
 }
 
-namespace {
-
-// A request waiting on signer_ui to come up, and the activate item for it.
-json activating(World& w, IntentBroker::Ticket* ticket)
-{
-    *ticket = w.ask();
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "signer_ui"}}, w.now);
-    return workOfKind(w.broker.takeWork(), "activate").at(0);
-}
-
-} // namespace
-
-// "activated" isn't enough: only a registered backend can be delivered to.
-LOGOS_TEST(an_activated_app_is_delivered_to_once_its_backend_registers)
-{
-    World w;
-    IntentBroker::Ticket t;
-    const std::string id = activating(w, &t)["id"].get<std::string>();
-    LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "open"}}, w.now));
-
-    LOGOS_ASSERT_TRUE(w.broker.answer(id, json{{"action", "activated"}}, w.now));
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
-
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
-    LOGOS_ASSERT_EQ(ofKind(w.broker.takeEffects(), K::Deliver).size(), std::size_t(1));
-}
-
-LOGOS_TEST(an_app_that_fails_to_come_up_is_unavailable)
-{
-    World w;
-    IntentBroker::Ticket t;
-    const std::string id = activating(w, &t)["id"].get<std::string>();
-    LOGOS_ASSERT_TRUE(w.broker.answer(id, json{{"action", "failed"}}, w.now));
-    LOGOS_ASSERT_FALSE(w.broker.answer(id, json{{"action", "failed"}}, w.now));   // answered once
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
-
-    // A backend that turns up afterwards gets nothing.
-    w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now);
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-}
-
-LOGOS_TEST(an_app_that_never_comes_up_is_unavailable)
-{
-    World w;
-    IntentBroker::Ticket t;
-    activating(w, &t);
-    w.advance(45000);
-    LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));
-    w.advance(1);
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
-}
-
 // The backstop only catches a chooser that went away.
 LOGOS_TEST(a_chooser_left_open_past_the_backstop_is_cancelled)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     const auto t = w.ask();
-    const auto shown = workOfKind(w.broker.takeWork(), "choose");
+    const auto shown = workOfKind(w.takeWork(), "choose");
     w.advance(10 * 60 * 1000 + 1);
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(t), err::cancelled);
@@ -1018,55 +848,17 @@ LOGOS_TEST(a_chooser_left_open_past_the_backstop_is_cancelled)
 
 LOGOS_TEST(a_queued_chooser_with_no_provider_left_is_unavailable)
 {
-    World w(Attention::Immediate, /*twoProviders=*/true);
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
     w.ask();
     w.now += 1;
     const auto second = w.ask();
-    const auto first = workOfKind(w.broker.takeWork(), "choose");
+    const auto first = workOfKind(w.takeWork(), "choose");
     reinstall(w, {walletPackage()});   // every provider uninstalled
 
     w.broker.answer(first[0]["id"].get<std::string>(), json{{"action", "cancel"}}, w.now);
-    LOGOS_ASSERT_TRUE(workOfKind(w.broker.takeWork(), "choose").empty());
+    LOGOS_ASSERT_TRUE(workOfKind(w.takeWork(), "choose").empty());
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(second), err::unavailable);
-}
-
-// Checked when the person picks it, and again when its app has come up:
-// the registry may change in between.
-LOGOS_TEST(an_app_that_changed_while_coming_up_gets_nothing)
-{
-    World w;
-    IntentBroker::Ticket t;
-    activating(w, &t);
-    json signer2 = signerUiPackage();
-    signer2["version"] = "2.0.0";
-    reinstall(w, {walletPackage(), signer2});
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    w.advance(400);
-    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
-}
-
-LOGOS_TEST(a_link_cannot_reach_an_app_that_dropped_web_while_coming_up)
-{
-    World w(Attention::Interactive);
-    w.registry.registerLinkRequester("basecamp_link", {});
-    const auto shareUi = [](bool web) {
-        return pkg("share_ui", "ui_qml", json::array({json{{"intent", "share.text"}, {"web", web}}}));
-    };
-    reinstall(w, {walletPackage(), shareUi(true)});
-    w.broker.submit("basecamp_link", "share.text", json::object(), false, /*fromPresenter=*/true, w.now);
-    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
-                    json{{"action", "choose"}, {"provider", "share_ui"}}, w.now);
-    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "activate").size(), std::size_t(1));
-
-    reinstall(w, {walletPackage(), shareUi(false)});
-    LOGOS_ASSERT_TRUE(w.broker.registerBackend("share_ui", "share_ui_backend", w.now));
-    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
-    w.advance(400);
-    const auto results = workOfKind(w.broker.takeWork(), "result");
-    LOGOS_ASSERT_EQ(results.size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(results[0]["result"]["error"].get<std::string>(), err::unavailable);
 }
 
 // An answer is held to what the provider declared when it was given the
@@ -1082,7 +874,7 @@ LOGOS_TEST(an_answer_is_checked_against_the_result_declared_at_delivery)
     };
     const json asker = pkg("asker_module", "core", json::array(), intentList({"stamp.make"}));
     reinstall(w, {walletPackage(), asker, stamp("signature")});
-    const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, false, w.now);
+    const auto t = w.broker.submit("asker_module", "stamp.make", json::object(), false, w.now);
     const auto d = pick(w, "stamp_module").dispatchId;
 
     reinstall(w, {walletPackage(), asker, stamp("approvalId")});

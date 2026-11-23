@@ -34,8 +34,11 @@ struct Harness {
     std::vector<std::string> settled;
     std::unique_ptr<IntentsService> service;
     std::string secret;
+    bool opensEverything;
 
-    explicit Harness(const std::string& attention = "immediate", bool claim = true)
+    // A presenter that opens every request at once, as Basecamp does until its
+    // Activity view shows the pending list, or one that leaves them pending.
+    explicit Harness(bool opensEverything = true, bool claim = true) : opensEverything(opensEverything)
     {
         IntentsService::Outbound out;
         out.deliver = [this](const std::string& module, const json& args,
@@ -48,8 +51,7 @@ struct Harness {
                                                    test::counterIds());
         if (!claim) return;
         const CallCaller host = CallCaller::host();
-        secret = json::parse(service->claim(json{{"attention", attention}}.dump()))
-                     .value("secret", std::string());
+        secret = json::parse(service->claim()).value("secret", std::string());
         install();
     }
 
@@ -57,25 +59,41 @@ struct Harness {
     {
         const CallCaller host = CallCaller::host();
         json packages = json::array({
-            json{{"name", "wallet_ui"}, {"installDir", dir.add("wallet_ui", pkg("wallet_ui", "ui_qml", json::array(),
-                                                                               intentList({"signing.approve"})))}},
-            json{{"name", "signer_ui"}, {"installDir", dir.add("signer_ui", pkg("signer_ui", "ui_qml",
-                                                                               intentList({"signing.approve"})))}},
+            json{{"name", "wallet_ui"}, {"installDir", dir.add("wallet_ui", pkg("wallet_ui", "ui_qml"))}},
+            json{{"name", "wallet_ui_backend"},
+                 {"installDir", dir.add("wallet_ui_backend", pkg("wallet_ui_backend", "core", json::array(),
+                                                                 intentList({"signing.approve"})))}},
+            json{{"name", "signer_ui_backend"},
+                 {"installDir", dir.add("signer_ui_backend", pkg("signer_ui_backend", "core",
+                                                                 intentList({"signing.approve"})))}},
             json{{"name", "cli_signer"}, {"installDir", dir.add("cli_signer", pkg("cli_signer", "core",
                                                                                  intentList({"signing.approve"})))}},
             json{{"name", "chain_module"}, {"installDir", dir.add("chain_module", pkg("chain_module", "core", json::array(),
                                                                                      intentList({"signing.approve"})))}},
         });
         service->setInstalled(secret, packages.dump());
-        service->backendRegistered(secret, "wallet_ui", "wallet_ui_backend");
     }
 
     json call(const std::string& out) { return json::parse(out); }
 
+    // The presenter's work; one that opens everything opens each pending request first.
     json work()
     {
         const CallCaller host = CallCaller::host();
-        return call(service->nextWork(secret)).value("items", json::array());
+        json out = json::array();
+        for (;;) {
+            const json items = call(service->nextWork(secret)).value("items", json::array());
+            bool opened = false;
+            for (const json& item : items) {
+                if (opensEverything && item.value("kind", "") == "pending") {
+                    service->answer(secret, item["id"], R"({"action":"open"})");
+                    opened = true;
+                } else {
+                    out.push_back(item);
+                }
+            }
+            if (!opened) return out;
+        }
     }
 
     // The person picks `provider` in the chooser on screen.
@@ -85,14 +103,6 @@ struct Harness {
         const CallCaller host = CallCaller::host();
         service->answer(secret, shown["id"], json{{"action", "choose"}, {"provider", provider}}.dump());
     }
-
-    std::string clickToken(const std::string& app, const std::string& intent = "")
-    {
-        const CallCaller host = CallCaller::host();
-        const std::string token = "tok-" + app + "-" + std::to_string(now) + "-0123456789";
-        LOGOS_ASSERT_TRUE(call(service->registerClickToken(secret, token, app, intent))["ok"].get<bool>());
-        return token;
-    }
 };
 
 } // namespace
@@ -101,15 +111,15 @@ struct Harness {
 
 LOGOS_TEST(a_module_cannot_claim_the_presenter_role)
 {
-    Harness h("immediate", /*claim=*/false);
+    Harness h(/*opensEverything=*/true, /*claim=*/false);
     const CallCaller module = CallCaller::module("wallet_ui_backend");
-    LOGOS_ASSERT_FALSE(h.call(h.service->claim("{}"))["ok"].get<bool>());
+    LOGOS_ASSERT_FALSE(h.call(h.service->claim())["ok"].get<bool>());
 }
 
 LOGOS_TEST(an_unknown_caller_cannot_claim_the_presenter_role)
 {
-    Harness h("immediate", /*claim=*/false);
-    LOGOS_ASSERT_FALSE(h.call(h.service->claim("{}"))["ok"].get<bool>());
+    Harness h(/*opensEverything=*/true, /*claim=*/false);
+    LOGOS_ASSERT_FALSE(h.call(h.service->claim())["ok"].get<bool>());
 }
 
 LOGOS_TEST(the_presenter_role_is_claimed_once)
@@ -118,17 +128,7 @@ LOGOS_TEST(the_presenter_role_is_claimed_once)
     Harness h;
     const CallCaller host = CallCaller::host();
     LOGOS_ASSERT_FALSE(h.secret.empty());
-    LOGOS_ASSERT_FALSE(h.call(h.service->claim("{}"))["ok"].get<bool>());
-}
-
-LOGOS_TEST(a_claim_with_unknown_options_is_refused)
-{
-    Harness h("immediate", /*claim=*/false);
-    const CallCaller host = CallCaller::host();
-    LOGOS_ASSERT_FALSE(h.call(h.service->claim(R"({"attention":"loud"})"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->claim(R"({"attention":"headless"})"))["ok"].get<bool>());
-    // The failed claims didn't use up the role.
-    LOGOS_ASSERT_TRUE(h.call(h.service->claim(R"({"attention":"immediate"})"))["ok"].get<bool>());
+    LOGOS_ASSERT_FALSE(h.call(h.service->claim())["ok"].get<bool>());
 }
 
 LOGOS_TEST(every_presenter_method_needs_the_secret)
@@ -139,9 +139,6 @@ LOGOS_TEST(every_presenter_method_needs_the_secret)
     LOGOS_ASSERT_FALSE(h.call(h.service->nextWork(wrong))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->nextWork(""))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->answer(wrong, "id1", "{}"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->registerClickToken(wrong, "0123456789abcdef", "wallet_ui", ""))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->backendRegistered(wrong, "signer_ui", "signer_ui_backend"))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->backendUnregistered(wrong, "wallet_ui"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->setInstalled(wrong, "[]"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->declareShell(wrong, R"({"name":"x"})"))["ok"].get<bool>());
     LOGOS_ASSERT_FALSE(h.call(h.service->shellRequest(wrong, "signing.approve", "{}", false))["ok"].get<bool>());
@@ -152,8 +149,8 @@ LOGOS_TEST(the_secret_is_useless_to_a_module)
     Harness h;
     const CallCaller module = CallCaller::module("wallet_ui_backend");
     LOGOS_ASSERT_FALSE(h.call(h.service->nextWork(h.secret))["ok"].get<bool>());
-    // A backend name nobody serves yet: only the Host check can refuse this.
-    LOGOS_ASSERT_FALSE(h.call(h.service->backendRegistered(h.secret, "signer_ui", "signer_ui_backend"))["ok"].get<bool>());
+    // The secret is right: only the Host check can refuse this.
+    LOGOS_ASSERT_FALSE(h.call(h.service->setInstalled(h.secret, "[]"))["ok"].get<bool>());
 }
 
 LOGOS_TEST(a_shell_may_not_reserve_the_platform_namespace)
@@ -172,16 +169,17 @@ LOGOS_TEST(a_host_caller_cannot_request_directly)
     // Under the daemon this is any logosctl user.
     Harness h;
     const CallCaller host = CallCaller::host();
-    const json r = h.call(h.service->request("signing.approve", "{}", ""));
+    const json r = h.call(h.service->request("signing.approve", "{}"));
     LOGOS_ASSERT_FALSE(r["ok"].get<bool>());
     LOGOS_ASSERT_EQ(r["error"].get<std::string>(), err::notDeclared);
 }
 
-LOGOS_TEST(an_app_requests_through_its_registered_backend)
+// An app's backend asks as itself, with the intents its own metadata.json declares.
+LOGOS_TEST(an_apps_backend_asks_as_itself)
 {
     Harness h;
     const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    const json r = h.call(h.service->request("signing.approve", "{}", ""));
+    const json r = h.call(h.service->request("signing.approve", "{}"));
     LOGOS_ASSERT_TRUE(r["ok"].get<bool>());
     const json state = h.call(h.service->result(r["handle"], r["receipt"]));
     LOGOS_ASSERT_EQ(state["state"].get<std::string>(), std::string("pending"));
@@ -193,7 +191,7 @@ LOGOS_TEST(a_module_that_never_declared_the_intent_is_refused_at_once)
     // Answered in the reply, with no handle and no `settled` broadcast.
     Harness h;
     const CallCaller module = CallCaller::module("random_module");
-    const json r = h.call(h.service->request("signing.approve", "{}", ""));
+    const json r = h.call(h.service->request("signing.approve", "{}"));
     LOGOS_ASSERT_FALSE(r["ok"].get<bool>());
     LOGOS_ASSERT_EQ(r["error"].get<std::string>(), err::notDeclared);
     LOGOS_ASSERT_FALSE(r.contains("handle"));
@@ -206,7 +204,7 @@ LOGOS_TEST(another_module_cannot_read_a_result)
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        r = h.call(h.service->request("signing.approve", "{}", ""));
+        r = h.call(h.service->request("signing.approve", "{}"));
     }
     const CallCaller other = CallCaller::module("chain_module");
     LOGOS_ASSERT_EQ(h.call(h.service->result(r["handle"], r["receipt"]))["error"].get<std::string>(),
@@ -214,119 +212,28 @@ LOGOS_TEST(another_module_cannot_read_a_result)
     LOGOS_ASSERT_FALSE(h.call(h.service->cancel(r["handle"], r["receipt"]))["ok"].get<bool>());
 }
 
-// ── Click tokens ─────────────────────────────────────────────────────────────
+// ── The pending list ─────────────────────────────────────────────────────────
 
-LOGOS_TEST(a_fresh_click_token_lets_the_request_pop_up)
+LOGOS_TEST(a_request_waits_in_the_pending_list_until_the_presenter_opens_it)
 {
-    Harness h("interactive");
-    const std::string token = h.clickToken("wallet_ui");
+    Harness h(/*opensEverything=*/false);
     const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    h.service->request("signing.approve", "{}", token);
-    const json work = h.work();
-    LOGOS_ASSERT_EQ(workOfKind(work, "choose").size(), std::size_t(1));
-    LOGOS_ASSERT_TRUE(workOfKind(work, "pending").empty());
-}
-
-LOGOS_TEST(no_click_token_means_the_pending_list)
-{
-    Harness h("interactive");
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    const json r = h.call(h.service->request("signing.approve", "{}", ""));
+    const json r = h.call(h.service->request("signing.approve", "{}"));
     LOGOS_ASSERT_TRUE(r["ok"].get<bool>());   // never a failure
     const json work = h.work();
     LOGOS_ASSERT_TRUE(workOfKind(work, "choose").empty());
     LOGOS_ASSERT_EQ(workOfKind(work, "pending").size(), std::size_t(1));
 }
 
-LOGOS_TEST(a_click_token_is_single_use)
-{
-    Harness h("interactive");
-    const std::string token = h.clickToken("wallet_ui");
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    h.service->request("signing.approve", "{}", token);
-    h.service->request("signing.approve", "{}", token);
-    const json work = h.work();
-    LOGOS_ASSERT_EQ(workOfKind(work, "choose").size(), std::size_t(1));
-    LOGOS_ASSERT_EQ(workOfKind(work, "pending").size(), std::size_t(1));
-}
-
-LOGOS_TEST(an_expired_click_token_counts_as_no_click)
-{
-    Harness h("interactive");
-    const std::string token = h.clickToken("wallet_ui");
-    h.now += IntentsService::kClickTokenMs + 1;
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    h.service->request("signing.approve", "{}", token);
-    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
-}
-
-LOGOS_TEST(a_click_token_from_another_app_counts_as_no_click)
-{
-    Harness h("interactive");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->backendRegistered(h.secret, "signer_ui", "signer_ui_backend");
-    }
-    const std::string signerToken = h.clickToken("signer_ui");
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    h.service->request("signing.approve", "{}", signerToken);
-    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
-}
-
-LOGOS_TEST(a_module_named_like_a_backend_cannot_spend_its_tokens)
-{
-    // signer_ui has a click token but no registered backend; a module that
-    // merely calls itself signer_ui_backend is not it.
-    // It declares the intent, so only the token decides whether it pops up.
-    Harness h("interactive");
-    {
-        const CallCaller host = CallCaller::host();
-        json packages = json::array({
-            json{{"name", "signer_ui"}, {"installDir", h.dir.add("signer_ui", pkg("signer_ui", "ui_qml",
-                                                                                 intentList({"signing.approve"})))}},
-            json{{"name", "cli_signer"}, {"installDir", h.dir.add("cli_signer", pkg("cli_signer", "core",
-                                                                                   intentList({"signing.approve"})))}},
-            json{{"name", "signer_ui_backend"},
-                 {"installDir", h.dir.add("impostor", pkg("signer_ui_backend", "core", json::array(),
-                                                         intentList({"signing.approve"})))}},
-        });
-        h.service->setInstalled(h.secret, packages.dump());
-        LOGOS_ASSERT_FALSE(h.call(h.service->backendRegistered(h.secret, "signer_ui", "signer_ui_backend"))["ok"].get<bool>());
-    }
-    const std::string token = h.clickToken("signer_ui");
-    const CallCaller impostor = CallCaller::module("signer_ui_backend");
-    LOGOS_ASSERT_TRUE(h.call(h.service->request("signing.approve", "{}", token))["ok"].get<bool>());
-    const json work = h.work();
-    LOGOS_ASSERT_TRUE(workOfKind(work, "choose").empty());
-    LOGOS_ASSERT_EQ(workOfKind(work, "pending").size(), std::size_t(1));
-}
-
-LOGOS_TEST(a_click_token_bound_to_an_intent_works_only_for_it)
-{
-    Harness h("interactive");
-    const std::string token = h.clickToken("wallet_ui", "wallets.unlock");
-    const CallCaller backend = CallCaller::module("wallet_ui_backend");
-    h.service->request("signing.approve", "{}", token);
-    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
-}
-
-LOGOS_TEST(click_tokens_are_only_for_installed_apps)
-{
-    Harness h("interactive");
-    const CallCaller host = CallCaller::host();
-    LOGOS_ASSERT_FALSE(h.call(h.service->registerClickToken(h.secret, "0123456789abcdef", "cli_signer", ""))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(h.call(h.service->registerClickToken(h.secret, "short", "wallet_ui", ""))["ok"].get<bool>());
-}
-
 // ── Providers ────────────────────────────────────────────────────────────────
 
 LOGOS_TEST(respond_is_accepted_only_from_the_module_delivered_to)
 {
-    Harness h("immediate");
+    Harness h;
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        r = h.call(h.service->request("signing.approve", "{}", ""));
+        r = h.call(h.service->request("signing.approve", "{}"));
     }
     const json choose = workOfKind(h.work(), "choose")[0];
     {
@@ -336,8 +243,8 @@ LOGOS_TEST(respond_is_accepted_only_from_the_module_delivered_to)
     LOGOS_ASSERT_EQ(h.deliveries.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(h.deliveries[0].module, std::string("cli_signer"));
     const std::string dispatch = h.deliveries[0].args[0].get<std::string>();
-    // deliver(dispatch, intent, params_json, requester): the requester is the app, not its backend.
-    LOGOS_ASSERT_EQ(h.deliveries[0].args[3].get<std::string>(), std::string("wallet_ui"));
+    // deliver(dispatch, intent, params_json, requester): the module that asked.
+    LOGOS_ASSERT_EQ(h.deliveries[0].args[3].get<std::string>(), std::string("wallet_ui_backend"));
     h.deliveries[0].done(true, json(R"({"ok":true})"));
 
     {
@@ -358,36 +265,13 @@ LOGOS_TEST(respond_is_accepted_only_from_the_module_delivered_to)
     LOGOS_ASSERT_EQ(state["result"]["data"].get<std::string>(), std::string("sig"));
 }
 
-LOGOS_TEST(a_backend_unregistered_after_delivery_cannot_respond)
-{
-    Harness h("immediate");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->backendRegistered(h.secret, "signer_ui", "signer_ui_backend");
-    }
-    json r;
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        r = h.call(h.service->request("signing.approve", "{}", ""));
-    }
-    const json choose = workOfKind(h.work(), "choose")[0];
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->answer(h.secret, choose["id"], R"({"action":"choose","provider":"signer_ui"})");
-        h.service->backendUnregistered(h.secret, "signer_ui");
-    }
-    const std::string dispatch = h.deliveries.at(0).args[0].get<std::string>();
-    const CallCaller provider = CallCaller::module("signer_ui_backend");
-    LOGOS_ASSERT_FALSE(h.call(h.service->respond(dispatch, true, "{}", ""))["ok"].get<bool>());
-}
-
 LOGOS_TEST(the_settled_event_carries_only_the_handle)
 {
-    Harness h("immediate");
+    Harness h;
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        r = h.call(h.service->request("signing.approve", R"({"amount":"1 ETH"})", ""));
+        r = h.call(h.service->request("signing.approve", R"({"amount":"1 ETH"})"));
     }
     h.choose("cli_signer");
     const std::string dispatch = h.deliveries.at(0).args[0].get<std::string>();
@@ -401,11 +285,11 @@ LOGOS_TEST(the_settled_event_carries_only_the_handle)
 
 LOGOS_TEST(an_unreachable_provider_settles_unavailable_after_the_floor)
 {
-    Harness h("immediate");
+    Harness h;
     json r;
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        r = h.call(h.service->request("signing.approve", "{}", ""));
+        r = h.call(h.service->request("signing.approve", "{}"));
     }
     h.choose("cli_signer");
     h.deliveries.at(0).done(false, json());
@@ -416,34 +300,6 @@ LOGOS_TEST(an_unreachable_provider_settles_unavailable_after_the_floor)
                     err::unavailable);
 }
 
-// A backend registered again by the same run keeps what it asked for.
-LOGOS_TEST(the_same_run_of_a_backend_registered_again_keeps_its_requests)
-{
-    Harness h("immediate");
-    const auto registerRun = [&](const std::string& run) {
-        const CallCaller host = CallCaller::host();
-        return h.call(h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", run))["ok"].get<bool>();
-    };
-    LOGOS_ASSERT_TRUE(registerRun("run1"));
-    json t;
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        t = h.call(h.service->request("signing.approve", "{}", ""));
-    }
-    LOGOS_ASSERT_TRUE(registerRun("run1"));
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        const json r = h.call(h.service->result(t["handle"].get<std::string>(), t["receipt"].get<std::string>()));
-        LOGOS_ASSERT_EQ(r.value("state", std::string()), std::string("pending"));
-    }
-    LOGOS_ASSERT_TRUE(registerRun("run2"));
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        const json r = h.call(h.service->result(t["handle"].get<std::string>(), t["receipt"].get<std::string>()));
-        LOGOS_ASSERT_EQ(r.value("error", std::string()), std::string("unknown_handle"));
-    }
-}
-
 namespace {
 
 // wallet_ui asks, the person picks cli_signer, and the delivery is outstanding.
@@ -451,7 +307,7 @@ Delivery delivered(Harness& h)
 {
     {
         const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", "");
+        h.service->request("signing.approve", "{}");
     }
     h.choose("cli_signer");
     return h.deliveries.at(0);
@@ -463,7 +319,7 @@ Delivery delivered(Harness& h)
 // and a taken delivery waits for the person past the 20 s an untaken one gets.
 LOGOS_TEST(a_delivery_taken_with_a_parsed_reply_waits_past_the_response_deadline)
 {
-    Harness h("immediate");
+    Harness h;
     delivered(h).done(true, json{{"ok", true}});
     h.now += 20001;
     h.service->tick();
@@ -472,46 +328,11 @@ LOGOS_TEST(a_delivery_taken_with_a_parsed_reply_waits_past_the_response_deadline
 
 LOGOS_TEST(a_delivery_not_taken_times_out_at_the_response_deadline)
 {
-    Harness h("immediate");
+    Harness h;
     delivered(h).done(true, json{{"ok", false}});
     h.now += 20001;
     h.service->tick();
     LOGOS_ASSERT_EQ(h.settled.size(), std::size_t(1));
-}
-
-// Registering the backend's run again changes nothing, not even the click in flight.
-LOGOS_TEST(registering_the_same_backend_run_again_keeps_the_click_token)
-{
-    Harness h("interactive");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-1");
-    }
-    const std::string token = h.clickToken("wallet_ui");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-1");
-    }
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", token);
-    }
-    LOGOS_ASSERT_EQ(workOfKind(h.work(), "choose").size(), std::size_t(1));
-}
-
-LOGOS_TEST(a_new_backend_run_starts_without_the_last_runs_click)
-{
-    Harness h("interactive");
-    const std::string token = h.clickToken("wallet_ui");
-    {
-        const CallCaller host = CallCaller::host();
-        h.service->backendRegistered(h.secret, "wallet_ui", "wallet_ui_backend", "run-2");
-    }
-    {
-        const CallCaller backend = CallCaller::module("wallet_ui_backend");
-        h.service->request("signing.approve", "{}", token);
-    }
-    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
 }
 
 // The host may call set_installed from more than one thread. A call that
@@ -519,8 +340,12 @@ LOGOS_TEST(a_new_backend_run_starts_without_the_last_runs_click)
 LOGOS_TEST(overlapping_set_installed_calls_land_in_the_order_they_started)
 {
     test::TempPackages dir;
-    const json older = json::array({json{{"name", "old_ui"}, {"installDir", dir.add("old_ui", pkg("old_ui", "ui_qml"))}}});
-    const json newer = json::array({json{{"name", "new_ui"}, {"installDir", dir.add("new_ui", pkg("new_ui", "ui_qml"))}}});
+    const auto asker = [&](const char* name) {
+        return json::array({json{{"name", name},
+                                 {"installDir", dir.add(name, pkg(name, "core", json::array(), intentList({"x.y"})))}}});
+    };
+    const json older = asker("old_module");
+    const json newer = asker("new_module");
 
     std::mutex m;
     std::condition_variable cv;
@@ -537,7 +362,7 @@ LOGOS_TEST(overlapping_set_installed_calls_land_in_the_order_they_started)
     std::string secret;
     {
         const CallCaller host = CallCaller::host();
-        secret = json::parse(s.claim(R"({"attention":"immediate"})"))["secret"].get<std::string>();
+        secret = json::parse(s.claim())["secret"].get<std::string>();
     }
     const auto install = [&](const json& packages) {
         const CallCaller host = CallCaller::host();
@@ -560,7 +385,10 @@ LOGOS_TEST(overlapping_set_installed_calls_land_in_the_order_they_started)
     first.join();
     second.join();
 
-    const CallCaller host = CallCaller::host();
-    LOGOS_ASSERT_TRUE(json::parse(s.registerClickToken(secret, "0123456789abcdef", "new_ui", ""))["ok"].get<bool>());
-    LOGOS_ASSERT_FALSE(json::parse(s.registerClickToken(secret, "0123456789abcdef", "old_ui", ""))["ok"].get<bool>());
+    {
+        const CallCaller module = CallCaller::module("new_module");
+        LOGOS_ASSERT_TRUE(json::parse(s.request("x.y", "{}"))["ok"].get<bool>());
+    }
+    const CallCaller module = CallCaller::module("old_module");
+    LOGOS_ASSERT_EQ(json::parse(s.request("x.y", "{}"))["error"].get<std::string>(), err::notDeclared);
 }

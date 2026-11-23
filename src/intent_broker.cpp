@@ -142,96 +142,6 @@ std::vector<Effect> IntentBroker::takeEffects()
     return out;
 }
 
-// ── Backends ─────────────────────────────────────────────────────────────────
-
-std::string IntentBroker::backendRefusal(const std::string& app, const std::string& module) const
-{
-    if (m_registry.typeOf(app) != "ui_qml") return "not an installed app";
-    // A package installed under this name is that package, not an app's backend.
-    if (m_registry.isKnownPackage(module) || m_registry.isShell(module)
-        || m_registry.isLinkRequester(module))
-        return "the name belongs to a package";
-    return {};
-}
-
-bool IntentBroker::registerBackend(const std::string& app, const std::string& module,
-                                   std::int64_t now, const std::string& instance)
-{
-    if (app.empty() || !isValidPackageName(module)) return false;
-    if (const std::string why = backendRefusal(app, module); !why.empty()) {
-        logLine("refused backend " + module + " for " + app + ": " + why);
-        return false;
-    }
-    for (const auto& [otherApp, b] : m_backends) {
-        if (b.module == module && otherApp != app) {
-            logLine("refused backend " + module + " for " + app + ": it serves " + otherApp);
-            return false;
-        }
-    }
-    if (const auto known = m_backends.find(app); known != m_backends.end()) {
-        if (!instance.empty() && known->second.module == module && known->second.instance == instance)
-            return true;
-        // A new instance is a new backend: what was dispatched to the old one fails.
-        unregisterBackend(app, now);
-    }
-    m_backends[app] = Backend{module, ++m_backendGeneration, instance};
-    drainActivation(app, /*ready=*/true, now);
-    return true;
-}
-
-std::uint64_t IntentBroker::backendGeneration(const std::string& app) const
-{
-    const auto b = m_backends.find(app);
-    return b == m_backends.end() ? 0 : b->second.generation;
-}
-
-void IntentBroker::unregisterBackend(const std::string& app, std::int64_t now)
-{
-    const auto b = m_backends.find(app);
-    if (b == m_backends.end()) return;
-    const Backend gone = b->second;
-    m_backends.erase(b);
-
-    std::vector<std::string> ids;
-    for (const auto& [id, r] : m_open) ids.push_back(id);
-    for (const std::string& id : ids) {
-        Request* r = find(id);
-        if (!r) continue;
-        if (r->requester == app && !r->fromPresenter) {
-            // Nobody left to pull it; a reloaded instance has no receipt for it.
-            finish(id, false, json(), err::cancelled, Path::EndpointGone, now);
-            continue;
-        }
-        if (r->provider == app && r->providerModule == gone.module
-            && r->providerGeneration == gone.generation && !r->floor)
-            failWithFloor(id, err::unavailable, Path::EndpointGone, now);
-    }
-    for (auto it = m_settled.begin(); it != m_settled.end();) {
-        auto next = std::next(it);
-        if (it->second.requester == app) eraseSettled(it);
-        it = next;
-    }
-}
-
-void IntentBroker::dropStaleBackends(std::int64_t now)
-{
-    std::vector<std::string> stale;
-    for (const auto& [app, b] : m_backends) {
-        if (const std::string why = backendRefusal(app, b.module); !why.empty()) {
-            logLine("dropped backend " + b.module + " for " + app + ": " + why);
-            stale.push_back(app);
-        }
-    }
-    for (const std::string& app : stale) unregisterBackend(app, now);
-}
-
-std::string IntentBroker::appForBackend(const std::string& module) const
-{
-    for (const auto& [app, b] : m_backends)
-        if (b.module == module) return app;
-    return {};
-}
-
 // ── Requests ─────────────────────────────────────────────────────────────────
 
 bool IntentBroker::admit(const std::string& requester, std::int64_t now)
@@ -249,8 +159,7 @@ bool IntentBroker::admit(const std::string& requester, std::int64_t now)
 }
 
 IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const std::string& intent,
-                                          const json& params, bool clicked, bool fromPresenter,
-                                          std::int64_t now)
+                                          const json& params, bool fromPresenter, std::int64_t now)
 {
     Request r;
     r.handle = m_mintId();
@@ -258,7 +167,7 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     r.dispatchId = m_mintId();
     r.requester = requester;
     r.intent = intent;
-    r.clicked = clicked || fromPresenter;
+    r.opened = fromPresenter;
     r.fromPresenter = fromPresenter;
     r.acceptedAt = now;
     r.phaseSince = now;
@@ -340,7 +249,7 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
         return;
     }
 
-    if (m_attention == Attention::Unclaimed) {
+    if (!m_claimed) {
         failWithFloor(id, err::unavailable, Path::Rejected, now);
         return;
     }
@@ -351,9 +260,9 @@ void IntentBroker::start(const std::string& id, std::int64_t now)
         return;
     }
 
-    // No click behind it: into the pending list before anything is resolved, so
-    // whether a provider exists is only decided once the person opens it.
-    if (m_attention == Attention::Interactive && !r->clicked) {
+    // Into the pending list before anything is resolved: whether a provider
+    // exists is only decided once the presenter opens it.
+    if (!r->opened) {
         park(id, now);
         return;
     }
@@ -499,7 +408,6 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
     Request* r = find(id);
     if (!r) return;
     r->provider = provider;
-    r->providerRevision = m_registry.revisionOf(provider);
     if (r->choicePresented) {
         r->choicePresented = false;
         dropWorkTarget(r->choiceWorkId);
@@ -512,66 +420,13 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
         dispatch(id, now);
     } else if (type == "core") {
         r->providerModule = provider;
-        r->providerGeneration = 0;
         dispatch(id, now);
-    } else if (type == "ui_qml") {
-        const auto b = m_backends.find(provider);
-        if (b != m_backends.end()) {
-            r->providerModule = b->second.module;
-            r->providerGeneration = b->second.generation;
-            dispatch(id, now);
-        } else {
-            r->phase = Phase::Activating;
-            r->phaseSince = now;
-            Activation& activation = m_activation[provider];
-            const bool alreadyAsked = !activation.ids.empty();
-            activation.ids.push_back(id);
-            if (!alreadyAsked)
-                activation.workId = pushWork(json{{"kind", "activate"}, {"app", provider}},
-                                             WorkTarget{WorkKind::Activate, provider});
-        }
     } else {
         failWithFloor(id, err::unavailable, Path::Rejected, now);
     }
 
     // The chooser is free once a choice is made, not when the request ends.
     presentNextChoice(now);
-}
-
-void IntentBroker::drainActivation(const std::string& app, bool ready, std::int64_t now)
-{
-    const auto q = m_activation.find(app);
-    if (q == m_activation.end()) return;
-    const std::vector<std::string> ids = q->second.ids;
-    endActivation(app);
-    for (const std::string& id : ids) {
-        Request* r = find(id);
-        if (!r || r->phase != Phase::Activating || r->floor) continue;
-        // The registry may have changed while the app came up.
-        if (ready && !stillProvides(*r, app, r->providerRevision)) {
-            logLine(app + " changed while it came up for " + r->intent + ": not delivered");
-            failWithFloor(id, err::unavailable, Path::Rejected, now);
-            continue;
-        }
-        const auto b = m_backends.find(app);
-        if (ready && b != m_backends.end()) {
-            r->providerModule = b->second.module;
-            r->providerGeneration = b->second.generation;
-            dispatch(id, now);
-        } else {
-            failWithFloor(id, err::unavailable, Path::EndpointGone, now);
-        }
-    }
-}
-
-void IntentBroker::endActivation(const std::string& app)
-{
-    const auto a = m_activation.find(app);
-    if (a == m_activation.end()) return;
-    const std::string workId = a->second.workId;
-    m_activation.erase(a);
-    // Not pulled: taken back. Pulled and unanswered: the presenter takes it down.
-    dropWorkTarget(workId);
 }
 
 std::string IntentBroker::specViolation(const std::string& provider, const std::string& intent,
@@ -640,9 +495,9 @@ void IntentBroker::dispatch(const std::string& id, std::int64_t now)
         return;
     }
 
-    // Raise the provider's window. The presenter decides how; a terminal ignores it.
-    if (m_registry.typeOf(r->provider) == "ui_qml" && r->provider != r->requester) {
-        pushWork(json{{"kind", "present"}, {"app", r->provider}, {"dispatch", id}});
+    // The presenter may raise the provider, if it has a screen; a terminal ignores it.
+    if (r->provider != r->requester) {
+        pushWork(json{{"kind", "present"}, {"provider", r->provider}, {"dispatch", id}});
         r->didNavigate = true;
     }
 
@@ -683,11 +538,6 @@ bool IntentBroker::respond(const std::string& responderModule, const std::string
     Request* r = find(dispatchId);
     const char* reject = nullptr;
     if (!awaitsResponseFrom(responderModule, dispatchId)) reject = "not waiting for it";
-    else if (m_registry.typeOf(r->provider) == "ui_qml") {
-        const auto b = m_backends.find(r->provider);
-        if (b == m_backends.end() || b->second.generation != r->providerGeneration)
-            reject = "backend changed since delivery";
-    }
     if (reject) {
         logLine("dropped a response from " + responderModule + ": " + reject);
         return false;
@@ -805,18 +655,6 @@ bool IntentBroker::answer(const std::string& workId, const json& answer, std::in
         selectProvider(target.target, provider, now);
         return true;
     }
-    case WorkKind::Activate: {
-        if (action != "activated" && action != "failed") return false;
-        // Ready only once its backend is registered; until then it waits.
-        const bool ready = action == "activated";
-        if (ready && !m_backends.count(target.target)) return true;
-        // Answered, so there is nothing left on screen to take down.
-        m_workTargets.erase(workId);
-        const auto a = m_activation.find(target.target);
-        if (a != m_activation.end() && a->second.workId == workId) a->second.workId.clear();
-        drainActivation(target.target, ready, now);
-        return true;
-    }
     case WorkKind::Pending: {
         Request* r = find(target.target);
         if (!r || r->phase != Phase::Pending || r->floor) return false;
@@ -827,10 +665,9 @@ bool IntentBroker::answer(const std::string& workId, const json& answer, std::in
             return true;
         }
         if (action != "open") return false;
-        // Opening it is the click.
         m_workTargets.erase(workId);
         r->pendingWorkId.clear();
-        r->clicked = true;
+        r->opened = true;
         r->phase = Phase::Accepted;
         r->phaseSince = now;
         start(target.target, now);
@@ -922,15 +759,6 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
     if (r.choicePresented) dropWorkTarget(r.choiceWorkId);
     if (!r.pendingWorkId.empty()) dropWorkTarget(r.pendingWorkId);
     if (!r.deliverWorkId.empty()) dropWorkTarget(r.deliverWorkId);
-    if (!r.provider.empty()) {
-        const auto a = m_activation.find(r.provider);
-        if (a != m_activation.end()) {
-            std::vector<std::string>& ids = a->second.ids;
-            ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
-            // The last one waiting: nothing may raise the app for it now.
-            if (ids.empty()) endActivation(r.provider);
-        }
-    }
 
     json envelope = makeEnvelope(ok, data, error);
     if (r.fromPresenter) {
@@ -976,7 +804,7 @@ void IntentBroker::tick(std::int64_t now)
         switch (r->phase) {
         case Phase::Accepted:
             // Nothing stays here; if it does, something was lost.
-            if (inPhase > m_config.activationMs)
+            if (inPhase > m_config.responseMs)
                 failWithFloor(id, err::unavailable, Path::Deadline, now);
             break;
         case Phase::Pending:
@@ -988,10 +816,6 @@ void IntentBroker::tick(std::int64_t now)
             // went away. Waiting its turn: as long as the pending list.
             if (inPhase > (r->choicePresented ? m_config.backstopMs : m_config.pendingTtlMs))
                 failWithFloor(id, err::cancelled, Path::Deadline, now);
-            break;
-        case Phase::Activating:
-            if (inPhase > m_config.activationMs)
-                failWithFloor(id, err::unavailable, Path::Deadline, now);
             break;
         case Phase::Dispatched:
             if (inPhase > (r->providerAccepted ? m_config.backstopMs : m_config.responseMs))

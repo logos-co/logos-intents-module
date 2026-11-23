@@ -1055,3 +1055,41 @@ LOGOS_TEST(a_queued_chooser_with_no_provider_left_is_unavailable)
     w.advance(400);
     LOGOS_ASSERT_EQ(w.settledError(second), err::unavailable);
 }
+
+// Checked when the person picks it, and again when its app has come up:
+// the registry may change in between.
+LOGOS_TEST(an_app_that_changed_while_coming_up_gets_nothing)
+{
+    World w;
+    IntentBroker::Ticket t;
+    activating(w, &t);
+    json signer2 = signerUiPackage();
+    signer2["version"] = "2.0.0";
+    reinstall(w, {walletPackage(), signer2});
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("signer_ui", "signer_ui_backend", w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+LOGOS_TEST(a_link_cannot_reach_an_app_that_dropped_web_while_coming_up)
+{
+    World w(Attention::Interactive);
+    w.registry.registerLinkRequester("basecamp_link", {});
+    const auto shareUi = [](bool web) {
+        return pkg("share_ui", "ui_qml", json::array({json{{"intent", "share.text"}, {"web", web}}}));
+    };
+    reinstall(w, {walletPackage(), shareUi(true)});
+    w.broker.submit("basecamp_link", "share.text", json::object(), false, /*fromPresenter=*/true, w.now);
+    w.broker.answer(workOfKind(w.broker.takeWork(), "choose")[0]["id"].get<std::string>(),
+                    json{{"action", "choose"}, {"provider", "share_ui"}}, w.now);
+    LOGOS_ASSERT_EQ(workOfKind(w.broker.takeWork(), "activate").size(), std::size_t(1));
+
+    reinstall(w, {walletPackage(), shareUi(false)});
+    LOGOS_ASSERT_TRUE(w.broker.registerBackend("share_ui", "share_ui_backend", w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    w.advance(400);
+    const auto results = workOfKind(w.broker.takeWork(), "result");
+    LOGOS_ASSERT_EQ(results.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(results[0]["result"]["error"].get<std::string>(), err::unavailable);
+}

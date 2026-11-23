@@ -491,13 +491,21 @@ void IntentBroker::presentNextChoice(std::int64_t now)
     }
 }
 
-// What made the provider one to show: still allowed, still reachable by this
-// requester, and still the package that was shown.
+// The provider as the person was shown it.
 bool IntentBroker::stillEligible(const Request& r, const std::string& provider) const
 {
     const auto shown = r.choiceRevisions.find(provider);
-    if (shown == r.choiceRevisions.end() || shown->second != m_registry.revisionOf(provider)) return false;
+    return shown != r.choiceRevisions.end() && stillProvides(r, provider, shown->second);
+}
+
+// Still the package at `revision`, the requester still allowed, and the
+// provider still reachable by it.
+bool IntentBroker::stillProvides(const Request& r, const std::string& provider,
+                                 std::uint64_t revision) const
+{
+    if (m_registry.revisionOf(provider) != revision) return false;
     if (!m_registry.requesterAllowed(r.intent, r.requester)) return false;
+    if (provider == r.requester) return m_registry.declaresProvide(provider, r.intent);
     const IntentRegistry::Resolution current = m_registry.resolveFor(r.requester, r.intent);
     return std::any_of(current.found.begin(), current.found.end(),
                        [&](const IntentRegistry::ProviderEntry& e) { return e.moduleName == provider; });
@@ -509,6 +517,7 @@ void IntentBroker::selectProvider(const std::string& id, const std::string& prov
     Request* r = find(id);
     if (!r) return;
     r->provider = provider;
+    r->providerRevision = m_registry.revisionOf(provider);
     if (r->choicePresented) {
         r->choicePresented = false;
         dropWorkTarget(r->choiceWorkId);
@@ -558,6 +567,12 @@ void IntentBroker::drainActivation(const std::string& app, bool ready, std::int6
     for (const std::string& id : ids) {
         Request* r = find(id);
         if (!r || r->phase != Phase::Activating || r->floor) continue;
+        // The registry may have changed while the app came up.
+        if (ready && !stillProvides(*r, app, r->providerRevision)) {
+            logLine(app + " changed while it came up for " + r->intent + ": not delivered");
+            failWithFloor(id, err::unavailable, Path::Rejected, now);
+            continue;
+        }
         const auto b = m_backends.find(app);
         if (ready && b != m_backends.end()) {
             r->providerModule = b->second.module;

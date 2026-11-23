@@ -178,6 +178,7 @@ private:
         std::string deliverWorkId;
 
         std::string provider;          // the registry name
+        std::uint64_t providerRevision = 0;   // the package as it was when picked
         std::string providerModule;    // where it was delivered; empty for the shell
         std::uint64_t providerGeneration = 0;
         bool providerAccepted = false;
@@ -240,6 +241,7 @@ private:
     void presentChoice(const std::string& id, std::int64_t now);
     bool showChoice(const std::string& id, std::int64_t now);
     bool stillEligible(const Request& r, const std::string& provider) const;
+    bool stillProvides(const Request& r, const std::string& provider, std::uint64_t revision) const;
     void presentNextChoice(std::int64_t now);
     bool aChoiceIsOnScreen() const;
     void selectProvider(const std::string& id, const std::string& provider, std::int64_t now);

@@ -61,9 +61,10 @@ Errors in a result: `unavailable` (no provider, not allowed, or the provider wen
 away — deliberately indistinguishable), `bad_request`, `cancelled`, `timeout`,
 `failed`.
 
-In Basecamp a request with no click token behind it waits in the pending list
-until the person opens it (up to 30 minutes), whether or not anything provides
-it: nothing about what is installed is decided before then.
+With an `interactive` presenter a request with no click token behind it waits
+in the pending list until the person opens it (up to 30 minutes), whether or
+not anything provides it: nothing about what is installed is decided before
+then.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
 values); 16 requests open and 4 in the pending list at a time; results are kept
@@ -128,16 +129,18 @@ claim({"attention": "interactive" | "immediate" | "headless"}) -> { ok, secret }
 declare_shell(secret, {...}); set_installed(secret, [...]); backend_registered(secret, app, module, instance) ...
 ```
 
+- `interactive`: a request pops up only with a click token behind it;
+  otherwise it waits in the pending list. Basecamp's mode once its Activity
+  view shows that list; until then Basecamp claims `immediate`.
+- `immediate` (a terminal presenter, and Basecamp for now): everything is shown
+  at once.
+- `headless` (a daemon with no one to ask): only providers named with
+  `configure_provider` are used, without asking.
+
 `instance` names one run of the backend. Registering the same app, module and
 instance again changes nothing; another instance, or an empty one, is a new
 backend, and whatever was dispatched to the one before fails. The host
 unregisters a backend when that run stops.
-
-- `interactive` (Basecamp): a request pops up only with a click token behind it;
-  otherwise it waits in the pending list.
-- `immediate` (a terminal presenter): everything is shown at once.
-- `headless` (a daemon with no one to ask): only providers named with
-  `configure_provider` are used, without asking.
 
 The presenter pulls its work with `next_work(secret)` when `work_available`
 fires, and answers items with `answer(secret, id, {...})`:

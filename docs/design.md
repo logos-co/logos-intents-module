@@ -1,14 +1,14 @@
 # Generic intents design
 
-**Status:** design record · Khushboo. What is built and what is left: [Steps](#steps). The README and the files in `contracts/` are the reference; where this document and they differ, they win.
-**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, Basecamp opens every request, as its QML intent path does.
+**Status:** design record, kept to the code. What is built and what is left: [Steps](#steps). The wire API is in `contracts/`; the security model, with what each rule depends on, is in [`security.md`](security.md).
+**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, Basecamp opens every request, as its QML intent path does; that is a development default, not for untrusted modules.
 
 ## Decisions
 
 1. **Only modules ask and provide.** An app asks and answers through its backend module (`<app>_backend`), which declares the app's `uses` and `provides` in its own `metadata.json`; QML views make no intent calls. QML-only apps go away in 0.5, so no app is left without a way in.
 2. **One presenter per core, fixed by the host at startup.** The frontend that starts `intents_module` is its presenter for that core's lifetime. There is no handover, so a second claim is always refused; a Signer CLI can't attach to Basecamp's core as presenter.
 3. **The presenter has its own contract,** `intents_presenter.lidl`, used only by frontends. Apps never get bindings for it.
-4. **A module only ever acts as itself, and the presenter decides when to interrupt.** `intents_module` knows modules and intents, not apps or screens. Every new request waits until the presenter opens it; the presenter, which sees the clicks, opens one at once when the person just clicked in the screen of the module that asked.
+4. **A module only ever acts as itself, and the presenter decides when to interrupt.** `intents_module` knows modules and intents, not apps or screens. A request for another module's intent waits until the presenter opens it; the presenter, which sees the clicks, opens one at once when the person just clicked in the screen of the module that asked.
 5. **Auto-return stays in the frontend.** `intents_module` reports a completed dispatch with its `handoff` flag; Basecamp applies its guards (frontmost, dialog open, dwell, circuit breaker) and decides whether to navigate.
 6. **Rollout:** the QML intent path stays on, unchanged, through every 0.4 release. `intents_module` and the backend path are built during 0.4 but not switched on in a released Basecamp. In 0.5 both flip together: QML intents off, `intents_module` on. No release runs two brokers.
 
@@ -43,7 +43,7 @@
 **In the module:**
 - the registry of who provides what, read from installed modules' manifests;
 - the name and payload checks, and the error codes (`src/intent_rules.h`);
-- holding every new request until the presenter opens it, and resolving nothing before;
+- holding each request for another module's intent until the presenter opens it, and resolving nothing before;
 - the `unavailable` timing floor;
 - rate limits;
 - result routing.
@@ -68,10 +68,10 @@ Plus calls only the presenter makes: `declare_shell`, `set_installed` (what is i
 
 **How the presenter gets its secret.** The host loads `intents_module` straight after `capability_module`, before any app, and at once calls `claim()`. `intents_module` accepts the claim only from a `Host` caller (`currentCaller().isHost()`), only once, and answers with a fresh secret. Every presenter method after that requires the secret.
 - **Why not hand the secret over at start.** The only private parent → child channel is the container's stdin pipe, which carries the module's auth token once and is then closed. Command-line arguments are readable by every process of the same user. Adding a second secret to the pipe would change `logos-container-subprocess`, `logos_host` and liblogos's loader API: a core change, for a protocol the new core replaces.
-- **Why a `Host` check plus "once".** In Basecamp, only Basecamp itself calls as `Host`, and modules call as `Module`. Under the daemon, every `logosctl call` is also `Host`, so "once, before the daemon accepts `logosctl`" is what keeps a `logosctl` user out.
+- **Why a `Host` check plus "once".** Modules call as `Module`. Besides Basecamp, `capability_module` calls as `Host`, and so do Basecamp's in-process QML views on logos-protocol below 0.7; under the daemon, every `logosctl call` is `Host` too. The module can't tell these apart, so "once, first" is what keeps them out: a deployment requirement on the host ([`security.md`](security.md#host-requirements)), not something the module checks.
 - **Consequence: the presenter is the process that hosts the core.** Basecamp, a CLI app that embeds its own core, or the daemon itself. A Signer CLI can't become the presenter of a daemon it reaches through `logosctl`.
-- **Restart.** If `intents_module` restarts, every in-flight request fails, and the host claims again as part of reloading it. Under the daemon a `logosctl` user could race that re-claim; that user already controls the daemon.
-- **The secret travels in an RPC reply,** so the minimum daemon version (gap 2) is a hard requirement for it, not only for results.
+- **Restart.** If `intents_module` restarts, every in-flight request fails, and the host must claim the new instance before anything else reaches it. Until it does, any `Host` caller could claim first, and as presenter open requests and pick providers without the person; it still couldn't call a provider's `deliver`, which accepts only `intents_module`. Closing that window needs a presenter credential from the core.
+- **The secret travels in a call reply.** `intents_module` answers every call directly (single dispatch), so neither the secret nor a result ever travels as a completion event, which over the Qt transport every replica of a module receives (threat 2).
 
 ## How apps declare and call intents
 
@@ -84,38 +84,18 @@ Apps don't list `intents_module` as a **package** dependency. A module lists the
 | **Request** | `modules().bind_intents("intents_module")`, then `request` → handle + receipt, wait for `settled(handle)`, then `result(handle, receipt)`. A view that wants to ask calls its backend. |
 | **Provide** | `intents_module` calls the provider's `deliver(dispatch, intent, params, requester)`; the provider answers with `intents.respond(dispatch, …)` and accepts `deliver` only from `intents_module`. If the person has to see something, the backend tells its own view through the `.rep`. |
 
-The contracts live in this repo's `contracts/`; the presenter's is sketched here, see `contracts/intents_presenter.lidl` for all of it.
+The contracts live in this repo's `contracts/`, and they are the wire API:
 
-```
-module intents {                       // contracts/intents.lidl
-  version "1.0.0"
-  method request(intent: tstr, params_json: tstr) -> tstr      // { ok, handle, receipt } at once
-  method result(handle: tstr, receipt: tstr) -> tstr           // { ok, state } or { ok, state: "settled", result: { ok, data, error } }
-  method cancel(handle: tstr, receipt: tstr) -> tstr
-  method respond(dispatch: tstr, ok: bool, data_json: tstr, error: tstr) -> tstr   // providers only
-  event settled(handle: tstr)                                   // handles only, no content
-}
-
-module intent_provider {               // contracts/intent_provider.lidl, implemented by provider modules
-  version "1.0.0"
-  method deliver(dispatch: tstr, intent: tstr, params_json: tstr, requester: tstr) -> tstr
-}
-
-module intents_presenter {             // contracts/intents_presenter.lidl, frontends only; every method but claim takes the secret
-  version "1.0.0"
-  method claim() -> tstr                                        // once, by the host: { ok, secret }
-  method next_work(secret: tstr) -> tstr                        // work items, see the table above
-  method answer(secret: tstr, work_id: tstr, answer_json: tstr) -> tstr
-  method shell_request(secret: tstr, intent: tstr, params_json: tstr, as_link: bool) -> tstr   // the shell's own requests, basecamp:// links
-  // also declare_shell, set_installed
-  event work_available(counter: uint)                           // a counter only, no content
-}
-```
+| Contract | For |
+|---|---|
+| [`intents.lidl`](../contracts/intents.lidl) | requesters (`request`, `result`, `cancel`, event `settled`), and providers' `respond` |
+| [`intent_provider.lidl`](../contracts/intent_provider.lidl) | providers: `deliver`, which only `intents_module` calls |
+| [`intents_presenter.lidl`](../contracts/intents_presenter.lidl) | the presenter only: `claim`, then every other method with the secret; event `work_available` |
 
 **Results are pulled with a receipt,** the pattern `signer_manager_module` uses too:
 - a result can take minutes, longer than the 20-second call timeout;
-- the `settled` event carries only a handle, so broadcasting it leaks nothing;
-- only the receipt holder can read the result;
+- the `settled` event carries only a handle: no params, receipt or result. It still reaches every module, so it shows when requests finish ([`security.md`](security.md#known-limits));
+- only the requester that asked, holding the receipt, can read the result;
 - requesters don't need to expose a method for the broker to call.
 
 Why not a package dependency:
@@ -129,7 +109,9 @@ Why not a package dependency:
 
 **Who decides: the presenter.** It is the one that sees input. An app's QML view is a `QQuickWidget` inside Basecamp's own process, so every click and key press reaches Basecamp's window before the view, and Basecamp watches input per view with an event filter. Browsers use the same idea ("user activation") to allow popups only after a real click.
 
-**How.** Every new request reaches the presenter as a `pending` item, before anything about it is resolved. Basecamp opens it at once when the person clicked within about 2 s in the screen of the module that asked, and uses that click up; otherwise the request stays in the pending list until the person opens it. A terminal presenter, already in front of the person, opens everything. Nothing about clicks crosses IPC, and views make no intent calls.
+**How.** Every request for another module's intent reaches the presenter as a `pending` item, before anything about it is resolved. Basecamp opens it at once when the person clicked within about 2 s in the screen of the module that asked, and uses that click up; otherwise the request stays in the pending list until the person opens it. A terminal presenter, already in front of the person and showing one request at a time, may open everything; a graphical one must not. Nothing about clicks crosses IPC, and views make no intent calls.
+
+**After a hand-off.** The click that started a hand-off was in the requester's screen, so the provider shows what was asked, and asks for anything that needs approval once the person clicks in its own view. Package Manager: `packages.install` shows the package, and clicking Install there asks for the install dialog.
 
 **What the module keeps.** Nothing about what is installed is looked up before a request is opened, so asking reveals nothing. The pending list is bounded per requester (4) and in time (30 minutes).
 
@@ -201,18 +183,18 @@ The namespaces are enforced: `logos.*` and the shell's prefix are refused from p
 
 | # | Threat | Mitigation |
 |---|---|---|
-| 1 | Under `logoscore`, a `logosctl call` arrives as `Host` (developer guide). A "Host is the presenter" rule would let any `logosctl` user claim the presenter role, open requests, and skip the person. | The frontend that starts `intents_module` claims the presenter role **once, at startup, before any app loads and before the daemon accepts `logosctl`**, as a `Host` caller, and gets a one-time secret. A second claim is always refused; there is no handover. |
-| 2 | Daemons older than the completion-channel reservation publish every method **reply** as a `__logos_call_complete__` event, so every result would be broadcast. | Require a minimum daemon version and refuse to start below it. Never put request or result content in an event. |
+| 1 | Under `logoscore`, a `logosctl call` arrives as `Host` (developer guide). A "Host is the presenter" rule would let any `logosctl` user claim the presenter role, open requests, and skip the person. | The frontend that starts `intents_module` claims the presenter role **once, at startup, before any app loads and before the daemon accepts `logosctl`**, as a `Host` caller, and gets a one-time secret, and claims again first after any restart of the module. A second claim is always refused; there is no handover. The module can't tell which `Host` caller claims first, so the order is a deployment requirement. |
+| 2 | A deferred call's **reply** travels as a `__logos_call_complete__` event, which over the Qt transport every replica of the module receives; before logos-protocol reserved that name (8bdb552), any subscriber could also read it. | `intents_module` answers every call directly (single dispatch, held by a flake check), so the secret and results never travel as events. Never put request or result content in an event. Hosts should still run a protocol with the reservation. |
 | 3 | `logoscore` can give a module a `tcp` / `tcp_ssl` listener, which makes the broker reachable from the LAN. | Callers are identified by their token on every transport, so the checks hold; the secret and results travel in replies, so a module exposed beyond the machine needs `tcp_ssl`. |
 | 4 | Whether the person clicked could be forged or replayed. | No proof of a click crosses IPC: the presenter, which sees real input, opens pending requests itself, once per click. |
 | 5 | Strings shown in a terminal can carry escape sequences that fake the screen. | Strip control characters; plain text only, as `evm_signer_cli` does for names. |
 | 6 | Any module can call a module that has no access rule. | Check the caller on every method. `respond` is accepted only from the provider the dispatch went to (dispatch id **and** caller). There's no "list providers" method; choosers reach only the presenter. |
-| 7 | The broker can be replaced by a module with the same name. | Reserved name, bundled with each frontend, hash-checked, never installable from a catalog. |
+| 7 | The broker can be replaced by a module with the same name. | Reserved name, bundled with each frontend, never installable from a catalog. How a frontend checks the files it loads is still open (open question 5). |
 | 8 | Sensitive payloads pass through one more process. | Memory only, size caps, never logged. |
 | 9 | A module named `<app>_backend` could pose as an app's backend. | A module only ever acts as itself, with the declarations in its own `metadata.json`; a real backend's ship in the app's package, and installers reserve `<app>_backend` names. |
 | 10 | A requester's rights change while its request is open: it is uninstalled, updated to drop the intent, or left out of a new restriction. | The request ends: it is checked again whenever the registry changes, and right before delivery. |
 
-**On the CLI too**
+**On the CLI too** (the Signer CLI, step 6, isn't built yet)
 
 | # | Threat | Mitigation |
 |---|---|---|
@@ -220,7 +202,7 @@ The namespaces are enforced: `logos.*` and the shell's prefix are refused from p
 | 12 | A provider chosen by configuration could be rerouted by editing it. | None is: every delivery goes to the provider the person picks. |
 | 13 | Two presenters on one core. | Impossible: one presenter per core, fixed at startup, no handover. |
 | 14 | `basecamp://` links, catalog install offers, grants by role. | They stay in Basecamp's presenter. Only the presenter may submit as the link requester. |
-| 15 | The module crashes mid-request. | Fail closed: in-flight requests answer `failed`, and frontends clear stale dialogs. |
+| 15 | The module crashes mid-request. | Fail closed: the new instance knows none of the old requests, so requesters get `unknown_handle` and treat them as failed, the presenter's own requests fail, and frontends clear stale dialogs. A provider that already acted isn't stopped. |
 | 16 | The timing floor is noisier over IPC. | Keep it, and make the answers for absent, denied and malformed identical. |
 
 Consent is drawn by the frontend and the provider, never the requester. The requester's identity is the core's attestation of the calling module.
@@ -253,7 +235,6 @@ Steps 1–7 are built during 0.4; 0.4 releases keep the QML intent path on. Step
 
 **Still missing before the switch:**
 - the pending list next to activity, so Basecamp opens only what the person clicked for;
-- a follow-up request from a provider after a hand-off: Package Manager's `confirm_install` after `packages.install` has no click behind it;
 - IPC tests that drive the real contracts between modules, not only the unit tests;
 - an open finding from review: a `result` or `dismiss` work item can be evicted when the presenter stops pulling, so the result of the shell's own request can be lost. Keeping results by handle for the presenter to fetch changes the presenter contract.
 
@@ -265,5 +246,5 @@ Steps 1–7 are built during 0.4; 0.4 releases keep the QML intent path on. Step
 2. How the pending list looks next to activity (one list or a section, badges, expiry of old requests): decided in the activity discussion.
 3. Should `evm_signer_cli` grow into the Signer CLI app, or be replaced by it?
 4. **Enforced access policy.** With `--access-policy enforce` (opt-in in both Basecamp and the daemon, off by default), a module may call only the modules it declares as dependencies. Apps don't declare `intents_module` as a dependency, and `intents_module` is no provider's dependent. So under enforcement every `request` and every `deliver` is refused. It needs either an explicit policy entry written by the frontend, or `intents_module` in the core's trusted/exempt lists (a core change).
-5. The minimum daemon version (the release that reserved `__logos_call_complete__`), and what "hash-checked" compares against.
+5. How a frontend checks that the `intents_module` it loads is the one it bundled (threat 7).
 6. **Shared intent contracts.** Each provider declares its own `params` and `result`, so two providers of one intent can disagree, and a requester that doesn't know which one answers can't rely on either. Should an intent have one versioned contract, with providers free to add optional fields?

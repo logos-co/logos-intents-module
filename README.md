@@ -4,10 +4,9 @@
 > **Work in progress — not finished, not released.** The API and the contracts
 > can still change. Basecamp runs it only behind `--intents-module`, in
 > development builds. Still missing: a pending-list UI in Basecamp (until then
-> it opens every request), follow-up requests from a provider after a hand-off, `basecamp://` links through the module, and apps
-> ported onto it. Providers and requesters also need unreleased changes in
-> `logos-module-builder`, `logos-view-module` and `logos-view-module-runtime`.
-> Don't depend on it yet.
+> it opens every request), and apps ported onto it. Basecamp's presenter, and
+> providers and requesters, also need unreleased changes in `logos-basecamp`,
+> `logos-module-builder` and `logos-view-module`. Don't depend on it yet.
 
 `intents_module` routes requests that need a person — approve a signature, pick a
 wallet, open an app — from the module that asks to the module that provides,
@@ -60,9 +59,10 @@ away — deliberately indistinguishable), `not_declared` (your manifest stopped
 listing the intent while the request was open: an update, or an uninstall),
 `bad_request`, `cancelled`, `timeout`, `failed`.
 
-Every request waits as pending until the presenter opens it (up to 30
-minutes), whether or not anything provides it: nothing about what is installed
-is decided before then. Basecamp opens it at once when the person just clicked
+A request for another module's intent waits as pending until the presenter
+opens it (up to 30 minutes), whether or not anything provides it: nothing about
+what is installed is decided before then. One for an intent your module
+provides itself goes straight to it. Basecamp opens it at once when the person just clicked
 in the requesting app's screen.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
@@ -131,11 +131,12 @@ declare_shell(secret, {...}); set_installed(secret, [...])
 
 Until a presenter claims, nobody can be asked: every request is `unavailable`.
 
-The presenter decides when to interrupt the person. A new request comes as a
-`pending` item and waits until the presenter opens it: a terminal presenter
-opens everything; Basecamp opens a request when the person just clicked in that
-module's screen, once per click, and until its Activity view shows the pending
-list it opens everything.
+The presenter decides when to interrupt the person. A request for another
+module's intent comes as a `pending` item and waits until the presenter opens
+it: a terminal presenter opens everything; Basecamp opens a request when the
+person just clicked in that module's screen, once per click, and until its
+Activity view shows the pending list it opens everything, as a development
+default. What a host must do is in [`docs/security.md`](docs/security.md#host-requirements).
 
 The presenter pulls its work with `next_work(secret)` when `work_available`
 fires, and answers items with `answer(secret, id, {...})`:

@@ -31,9 +31,24 @@
           fi
           touch $out
         '';
+      # Replies, the presenter's secret and results among them, must stay call
+      # replies: a "multi" module answers through a completion event, which
+      # every replica of the module receives (docs/security.md).
+      singleDispatchCheck = system:
+        let pkgs = logos-module-builder.inputs.nixpkgs.legacyPackages.${system};
+        in pkgs.runCommand "intents-single-dispatch" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          if ! jq -e '(.concurrency // "single") == "single"' ${./metadata.json} > /dev/null; then
+            echo "intents_module must keep single dispatch: see docs/security.md" >&2
+            exit 1
+          fi
+          touch $out
+        '';
     in module // {
       checks = builtins.mapAttrs
-        (system: checks: checks // { contracts = contractsCheck system; })
+        (system: checks: checks // {
+          contracts = contractsCheck system;
+          single-dispatch = singleDispatchCheck system;
+        })
         (module.checks or {});
     };
 }

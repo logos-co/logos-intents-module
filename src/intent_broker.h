@@ -43,6 +43,7 @@ struct BrokerConfig {
 
     // Across everyone.
     std::size_t maxOpenTotal = 1024;
+    std::size_t maxOpenBytesTotal = 64 * 1024 * 1024;
     std::size_t maxResultBytesTotal = 64 * 1024 * 1024;
 };
 
@@ -111,6 +112,9 @@ public:
     bool answer(const std::string& workId, const json& answer, std::int64_t now);
 
     void tick(std::int64_t now);
+    // After the registry changed: a request its requester no longer declares,
+    // or may no longer make, ends.
+    void registryChanged(std::int64_t now);
     std::vector<Effect> takeEffects();
 
     std::size_t openCount() const { return m_open.size(); }
@@ -222,6 +226,9 @@ private:
     Request* find(const std::string& id);
     int countOpen(const std::string& requester, std::optional<Phase> phase = std::nullopt) const;
     std::size_t openBytes(const std::string& requester) const;
+    std::size_t openBytesTotal() const;
+    // False, ending the request, when its requester may no longer make it.
+    bool requesterStillMay(const std::string& id, std::int64_t now);
 
     IntentRegistry& m_registry;
     IdFn m_mintId;

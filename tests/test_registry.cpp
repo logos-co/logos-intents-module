@@ -145,6 +145,25 @@ LOGOS_TEST(a_provides_entry_describes_its_result_like_its_params)
     LOGOS_ASSERT_TRUE(r.resultSpecFor("stamp_module", "other.intent").empty());
 }
 
+// A typo in a type isn't silent: the field goes unchecked, and the registry says so.
+LOGOS_TEST(an_unknown_param_type_is_reported)
+{
+    IntentRegistry r;
+    r.ingest("flag_module", pkg("flag_module", "core", json::array({json{
+        {"intent", "flag.set"},
+        {"params", json::array({json{{"name", "on"}, {"type", "boolean"}, {"required", true}},
+                                json{{"name", "label"}, {"type", "string"}}})},
+        {"result", json::array({json{{"name", "at"}, {"type", "int"}}})},
+    }})), "", "");
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(
+        r, "flag_module: 'flag.set' declares 'on' in 'params' as 'boolean', not one of string, number, bool"));
+    LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "declares 'at' in 'result' as 'int'"));
+    LOGOS_ASSERT_FALSE(hasDiagnosticContaining(r, "'label'"));
+    const auto& params = r.paramsSpecFor("flag_module", "flag.set");
+    LOGOS_ASSERT_EQ(params.size(), std::size_t(2));
+    LOGOS_ASSERT_TRUE(params[0].required);
+}
+
 LOGOS_TEST(restricted_intents_admit_only_their_requesters)
 {
     IntentRegistry r;
@@ -310,6 +329,20 @@ LOGOS_TEST(malformed_uses_and_provides_are_dropped_with_a_diagnostic)
     r.ingest("c_module", pkg("c_module", "core", json::array({json{{"intent", "share.text"}, {"params", params}}})), "", "");
     LOGOS_ASSERT_EQ(r.paramsSpecFor("c_module", "share.text").size(), std::size_t(32));
     LOGOS_ASSERT_TRUE(hasDiagnosticContaining(r, "more than 32 entries in 'params'"));
+}
+
+// Dev hosts lay dependencies out as symlinks (Basecamp's nix/devDeps.nix copies
+// with `cp -rs`): a manifest reached through one is read like any other.
+LOGOS_TEST(a_symlinked_manifest_is_read)
+{
+    test::TempPackages dir;
+    const std::string real = dir.add("store_copy", pkg("linked_module", "core", intentList({"x.y"})));
+    const std::string d = dir.add("linked_module", json::object());
+    std::remove((d + "/metadata.json").c_str());
+    LOGOS_ASSERT_EQ(symlink((real + "/metadata.json").c_str(), (d + "/metadata.json").c_str()), 0);
+    IntentRegistry r;
+    r.rebuild(loadPackages({InstalledPackage{"linked_module", d, "", ""}}));
+    LOGOS_ASSERT_TRUE(r.declaresProvide("linked_module", "x.y"));
 }
 
 LOGOS_TEST(a_metadata_json_that_is_a_directory_is_refused)

@@ -295,7 +295,12 @@ std::vector<IntentRegistry::Provide> IntentRegistry::parseProvides(const json* r
                 }
                 const std::string fieldName = stringAt(spec, "name");
                 if (fieldName.empty()) continue;
-                out.push_back({fieldName, stringAt(spec, "type"), boolAt(spec, "required").value_or(false)});
+                const std::string type = stringAt(spec, "type");
+                if (!type.empty() && !isParamType(type))
+                    diagnose(name + ": '" + p.intent + "' declares '" + forLog(fieldName, 64) + "' in '" + field
+                             + "' as '" + forLog(type, 32)
+                             + "', not one of string, number, bool, object, array — its type isn't checked");
+                out.push_back({fieldName, type, boolAt(spec, "required").value_or(false)});
             }
         };
         describe("params", p.params);

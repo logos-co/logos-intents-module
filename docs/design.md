@@ -210,17 +210,18 @@ The namespaces are enforced: `logos.*` and the shell's prefix are refused from p
 | 7 | The broker can be replaced by a module with the same name. | Reserved name, bundled with each frontend, hash-checked, never installable from a catalog. |
 | 8 | Sensitive payloads pass through one more process. | Memory only, size caps, never logged. |
 | 9 | A module named `<app>_backend` could pose as an app's backend. | A module only ever acts as itself, with the declarations in its own `metadata.json`; a real backend's ship in the app's package, and installers reserve `<app>_backend` names. |
+| 10 | A requester's rights change while its request is open: it is uninstalled, updated to drop the intent, or left out of a new restriction. | The request ends: it is checked again whenever the registry changes, and right before delivery. |
 
 **On the CLI too**
 
 | # | Threat | Mitigation |
 |---|---|---|
-| 10 | Provider identity is a name from unsigned `metadata.json`. | A CLI prompt shows the package name and whether it is signed, as Basecamp's chooser does. |
-| 11 | A provider chosen by configuration could be rerouted by editing it. | None is: every delivery goes to the provider the person picks. |
-| 12 | Two presenters on one core. | Impossible: one presenter per core, fixed at startup, no handover. |
-| 13 | `basecamp://` links, catalog install offers, grants by role. | They stay in Basecamp's presenter. Only the presenter may submit as the link requester. |
-| 14 | The module crashes mid-request. | Fail closed: in-flight requests answer `failed`, and frontends clear stale dialogs. |
-| 15 | The timing floor is noisier over IPC. | Keep it, and make the answers for absent, denied and malformed identical. |
+| 11 | Provider identity is a name from unsigned `metadata.json`. | A CLI prompt shows the package name and whether it is signed, as Basecamp's chooser does. |
+| 12 | A provider chosen by configuration could be rerouted by editing it. | None is: every delivery goes to the provider the person picks. |
+| 13 | Two presenters on one core. | Impossible: one presenter per core, fixed at startup, no handover. |
+| 14 | `basecamp://` links, catalog install offers, grants by role. | They stay in Basecamp's presenter. Only the presenter may submit as the link requester. |
+| 15 | The module crashes mid-request. | Fail closed: in-flight requests answer `failed`, and frontends clear stale dialogs. |
+| 16 | The timing floor is noisier over IPC. | Keep it, and make the answers for absent, denied and malformed identical. |
 
 Consent is drawn by the frontend and the provider, never the requester. The requester's identity is the core's attestation of the calling module.
 
@@ -231,6 +232,7 @@ Consent is drawn by the frontend and the provider, never the requester. The requ
 - any presenter method called without the secret;
 - a module named like the shell, the link requester or an installed app;
 - `respond` from the wrong module;
+- a request whose requester no longer declares its intent, or a new restriction leaves out;
 - a display name containing escape sequences.
 
 ## Steps

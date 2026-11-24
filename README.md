@@ -56,8 +56,9 @@ manifest doesn't list the intent in `uses`) and `failed` (more than 20 requests
 at once, or 5 a second sustained).
 
 Errors in a result: `unavailable` (no provider, not allowed, or the provider went
-away — deliberately indistinguishable), `bad_request`, `cancelled`, `timeout`,
-`failed`.
+away — deliberately indistinguishable), `not_declared` (your manifest stopped
+listing the intent while the request was open: an update, or an uninstall),
+`bad_request`, `cancelled`, `timeout`, `failed`.
 
 Every request waits as pending until the presenter opens it (up to 30
 minutes), whether or not anything provides it: nothing about what is installed

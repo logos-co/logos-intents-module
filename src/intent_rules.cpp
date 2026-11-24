@@ -296,6 +296,11 @@ json makeEnvelope(bool ok, const json& data, const std::string& error)
     };
 }
 
+bool isParamType(const std::string& type)
+{
+    return type == "string" || type == "number" || type == "bool" || type == "object" || type == "array";
+}
+
 std::string displaySafe(const std::string& text)
 {
     std::string out;

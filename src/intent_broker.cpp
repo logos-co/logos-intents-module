@@ -82,6 +82,13 @@ std::size_t IntentBroker::openBytes(const std::string& requester) const
     return n;
 }
 
+std::size_t IntentBroker::openBytesTotal() const
+{
+    std::size_t n = 0;
+    for (const auto& [id, r] : m_open) n += r.paramsBytes;
+    return n;
+}
+
 std::string IntentBroker::pushWork(json item, std::optional<WorkTarget> target)
 {
     const std::string id = m_mintId();
@@ -176,7 +183,8 @@ IntentBroker::Ticket IntentBroker::submit(const std::string& requester, const st
     const std::size_t bytes = payloadOk ? approxBytes(params) : 0;
     const bool withinLimit = countOpen(requester) < m_config.maxOpenPerRequester
         && m_open.size() < m_config.maxOpenTotal
-        && openBytes(requester) + bytes <= m_config.maxOpenBytesPerRequester;
+        && openBytes(requester) + bytes <= m_config.maxOpenBytesPerRequester
+        && openBytesTotal() + bytes <= m_config.maxOpenBytesTotal;
     const Ticket ticket{r.handle, r.receipt};
     if (!withinLimit) {
         logLine("refused " + forLog(intent, 64) + " from " + requester + ": over its open-request limits");
@@ -402,6 +410,24 @@ bool IntentBroker::stillProvides(const Request& r, const std::string& provider,
                        [&](const IntentRegistry::ProviderEntry& e) { return e.moduleName == provider; });
 }
 
+// What it declared when it asked holds only as long as the registry says so.
+bool IntentBroker::requesterStillMay(const std::string& id, std::int64_t now)
+{
+    Request* r = find(id);
+    if (!r) return false;
+    if (!m_registry.declaresUse(r->requester, r->intent)) {
+        logLine("withdrew " + r->intent + " from " + r->requester + ": it no longer declares it");
+        finish(id, false, json(), err::notDeclared, Path::Rejected, now);
+        return false;
+    }
+    if (!m_registry.requesterAllowed(r->intent, r->requester)) {
+        logLine("withdrew " + r->intent + " from " + r->requester + ": no longer a permitted requester");
+        failWithFloor(id, err::unavailable, Path::Rejected, now);
+        return false;
+    }
+    return true;
+}
+
 void IntentBroker::selectProvider(const std::string& id, const std::string& provider,
                                   std::int64_t now)
 {
@@ -466,6 +492,7 @@ std::string IntentBroker::resultViolation(const std::vector<IntentRegistry::Para
 
 void IntentBroker::dispatch(const std::string& id, std::int64_t now)
 {
+    if (!requesterStillMay(id, now)) return;
     Request* r = find(id);
     if (!r) return;
 
@@ -783,6 +810,14 @@ void IntentBroker::finish(const std::string& id, bool ok, const json& data,
     }
 
     presentNextChoice(now);
+}
+
+void IntentBroker::registryChanged(std::int64_t now)
+{
+    std::vector<std::string> ids;
+    for (const auto& [id, r] : m_open)
+        if (!r.floor) ids.push_back(id);
+    for (const std::string& id : ids) requesterStillMay(id, now);
 }
 
 void IntentBroker::tick(std::int64_t now)

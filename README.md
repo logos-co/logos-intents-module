@@ -1,12 +1,11 @@
 # logos-intents-module
 
-> [!WARNING]
-> **Work in progress — not finished, not released.** The API and the contracts
-> can still change. Basecamp runs it only behind `--intents-module`, in
-> development builds. Still missing: a pending-list UI in Basecamp (until then
-> it opens every request), and apps ported onto it. Basecamp's presenter, and
-> providers and requesters, also need unreleased changes in `logos-basecamp`,
-> `logos-module-builder` and `logos-view-module`. Don't depend on it yet.
+> [!NOTE]
+> **Not in a release yet.** Basecamp runs it behind `--intents-module`, in
+> development builds, until the 0.5 switch. Basecamp's presenter, and providers
+> and requesters, need changes in `logos-basecamp`, `logos-module-builder` and
+> `logos-view-module` that aren't released yet. Still to come: Basecamp's
+> pending list (until then it opens every request), and apps ported onto it.
 
 `intents_module` routes requests that need a person — approve a signature, pick a
 wallet, open an app — from the module that asks to the module that provides,

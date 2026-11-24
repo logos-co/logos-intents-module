@@ -41,6 +41,7 @@ public:
 
     IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config = {},
                    Loader load = loadPackages);
+    ~IntentsService();
 
     // ── Requesters: any module, an app's backend included ──────────────
     std::string request(const std::string& intent, const std::string& paramsJson);
@@ -63,6 +64,8 @@ public:
 
     // Deadlines, and `settled` events held back until their request has returned.
     void tick();
+    // Drops every delivery reply from now on, once those already running are done.
+    void close();
 
 private:
     // The calling module's name, as a requester. Empty for anything else,
@@ -84,8 +87,10 @@ private:
     Loader m_load;
     // One set_installed at a time, so an older read can't land after a newer one.
     std::mutex m_installMutex;
-    // Delivery replies can arrive after this object is gone; they check this first.
-    std::shared_ptr<int> m_alive = std::make_shared<int>(0);
+    // Delivery replies come from any thread, as late as they like: each holds
+    // the gate while it runs, and close() shuts it.
+    struct Gate;
+    std::shared_ptr<Gate> m_gate;
 
     std::mutex m_mutex;
     IntentRegistry m_registry;

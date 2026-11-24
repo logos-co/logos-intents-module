@@ -7,6 +7,7 @@
 #include "intents_service.h"
 #include "test_support.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -32,33 +33,39 @@ struct Harness {
     std::int64_t now = 1000;
     std::vector<Delivery> deliveries;
     std::vector<std::string> settled;
+    std::function<void()> onSettled;   // runs as a `settled` event goes out
     std::unique_ptr<IntentsService> service;
     std::string secret;
     bool opensEverything;
 
     // A presenter that opens every request at once, as Basecamp does until its
     // Activity view shows the pending list, or one that leaves them pending.
-    explicit Harness(bool opensEverything = true, bool claim = true) : opensEverything(opensEverything)
+    explicit Harness(bool opensEverything = true, bool claim = true, BrokerConfig config = {})
+        : opensEverything(opensEverything)
     {
         IntentsService::Outbound out;
         out.deliver = [this](const std::string& module, const json& args,
                              std::function<void(bool, const json&)> done) {
             deliveries.push_back({module, args, std::move(done)});
         };
-        out.settled = [this](const std::string& h) { settled.push_back(h); };
+        out.settled = [this](const std::string& h) {
+            settled.push_back(h);
+            if (onSettled) onSettled();
+        };
         out.workAvailable = [](std::uint64_t) {};
         service = std::make_unique<IntentsService>(std::move(out), [this]() { return now; },
-                                                   test::counterIds());
+                                                   test::counterIds(), config);
         if (!claim) return;
         const CallCaller host = CallCaller::host();
         secret = json::parse(service->claim()).value("secret", std::string());
         install();
     }
 
-    void install()
+    // Everything below, but `without`.
+    void install(const std::string& without = "")
     {
         const CallCaller host = CallCaller::host();
-        json packages = json::array({
+        json all = json::array({
             json{{"name", "wallet_ui"}, {"installDir", dir.add("wallet_ui", pkg("wallet_ui", "ui_qml"))}},
             json{{"name", "wallet_ui_backend"},
                  {"installDir", dir.add("wallet_ui_backend", pkg("wallet_ui_backend", "core", json::array(),
@@ -71,6 +78,9 @@ struct Harness {
             json{{"name", "chain_module"}, {"installDir", dir.add("chain_module", pkg("chain_module", "core", json::array(),
                                                                                      intentList({"signing.approve"})))}},
         });
+        json packages = json::array();
+        for (const json& p : all)
+            if (p["name"] != without) packages.push_back(p);
         service->setInstalled(secret, packages.dump());
     }
 
@@ -391,4 +401,108 @@ LOGOS_TEST(overlapping_set_installed_calls_land_in_the_order_they_started)
     }
     const CallCaller module = CallCaller::module("old_module");
     LOGOS_ASSERT_EQ(json::parse(s.request("x.y", "{}"))["error"].get<std::string>(), err::notDeclared);
+}
+
+// ── Delivery replies and the service's lifetime ──────────────────────────────
+
+LOGOS_TEST(a_delivery_reply_after_the_service_is_gone_is_dropped)
+{
+    Harness h;
+    const Delivery d = delivered(h);
+    h.service.reset();
+    d.done(true, json{{"ok", true}});
+    LOGOS_ASSERT_TRUE(h.settled.empty());
+}
+
+LOGOS_TEST(a_delivery_reply_after_close_is_dropped)
+{
+    BrokerConfig instant;
+    instant.errorFloorMs = 0;
+    Harness h(/*opensEverything=*/true, /*claim=*/true, instant);
+    const Delivery d = delivered(h);
+    h.service->close();
+    d.done(false, json());   // would settle `unavailable` at once
+    LOGOS_ASSERT_TRUE(h.settled.empty());
+}
+
+// A reply comes from any thread: the service waits for one that is running
+// before it goes, so the reply never meets it half destroyed.
+LOGOS_TEST(the_service_waits_for_a_running_delivery_reply_before_it_goes)
+{
+    BrokerConfig instant;
+    instant.errorFloorMs = 0;
+    Harness h(/*opensEverything=*/true, /*claim=*/true, instant);
+    const Delivery d = delivered(h);
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool inReply = false;
+    bool release = false;
+    h.onSettled = [&]() {
+        std::unique_lock<std::mutex> lock(m);
+        inReply = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return release; });
+    };
+    std::thread replying([&] { d.done(false, json()); });
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return inReply; });
+    }
+    std::atomic<bool> gone{false};
+    std::thread destroying([&] {
+        h.service.reset();
+        gone = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const bool goneWhileReplying = gone.load();
+    {
+        std::lock_guard<std::mutex> lock(m);
+        release = true;
+    }
+    cv.notify_all();
+    replying.join();
+    destroying.join();
+    LOGOS_ASSERT_FALSE(goneWhileReplying);
+    LOGOS_ASSERT_TRUE(gone.load());
+}
+
+// ── Requests and the registry ────────────────────────────────────────────────
+
+LOGOS_TEST(set_installed_ends_the_open_requests_of_a_requester_it_no_longer_lists)
+{
+    Harness h(/*opensEverything=*/false);
+    json t;
+    {
+        const CallCaller module = CallCaller::module("chain_module");
+        t = h.call(h.service->request("signing.approve", "{}"));
+    }
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "pending").size(), std::size_t(1));
+    h.install(/*without=*/"chain_module");
+    LOGOS_ASSERT_EQ(h.settled.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(workOfKind(h.work(), "dismiss").size(), std::size_t(1));
+    const CallCaller module = CallCaller::module("chain_module");
+    LOGOS_ASSERT_EQ(h.call(h.service->result(t["handle"], t["receipt"]))["result"]["error"].get<std::string>(),
+                    err::notDeclared);
+}
+
+LOGOS_TEST(a_shell_declaration_ends_the_open_requests_its_restrictions_leave_out)
+{
+    Harness h(/*opensEverything=*/false);
+    json t;
+    {
+        const CallCaller module = CallCaller::module("chain_module");
+        t = h.call(h.service->request("signing.approve", "{}"));
+    }
+    {
+        const CallCaller host = CallCaller::host();
+        const json shell{{"name", "basecamp"},
+                         {"restricted", json{{"signing.approve", json::array({"wallet_ui_backend"})}}}};
+        LOGOS_ASSERT_TRUE(h.call(h.service->declareShell(h.secret, shell.dump()))["ok"].get<bool>());
+    }
+    h.now += 400;
+    h.service->tick();
+    const CallCaller module = CallCaller::module("chain_module");
+    LOGOS_ASSERT_EQ(h.call(h.service->result(t["handle"], t["receipt"]))["result"]["error"].get<std::string>(),
+                    err::unavailable);
 }

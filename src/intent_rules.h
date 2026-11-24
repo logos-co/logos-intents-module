@@ -89,6 +89,9 @@ std::size_t approxBytes(const json& value);
 // { ok, data, error }: data only when ok, error only when not.
 json makeEnvelope(bool ok, const json& data, const std::string& error);
 
+// The types a `params` or `result` entry may declare.
+bool isParamType(const std::string& type);
+
 // ── Text ─────────────────────────────────────────────────────────────────────
 // Text a presenter will draw, with control and invisible formatting characters
 // removed: C0, DEL, C1, bidirectional controls, zero-width characters, line and

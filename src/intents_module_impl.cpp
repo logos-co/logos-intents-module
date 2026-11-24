@@ -121,6 +121,7 @@ IntentsModuleImpl::~IntentsModuleImpl()
 LogosShutdown IntentsModuleImpl::aboutToUnload()
 {
     m_state->stop();
+    m_state->service->close();
     return LogosShutdown::Synchronous;
 }
 

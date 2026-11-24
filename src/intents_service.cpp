@@ -4,6 +4,7 @@
 
 #include <logos_caller.h>
 
+#include <condition_variable>
 #include <cstdio>
 
 namespace intents {
@@ -47,14 +48,47 @@ std::vector<std::string> stringList(const json* v)
 
 } // namespace
 
+struct IntentsService::Gate {
+    std::mutex m;
+    std::condition_variable idle;
+    int running = 0;
+    bool closed = false;
+
+    bool enter()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (closed) return false;
+        ++running;
+        return true;
+    }
+    void leave()
+    {
+        std::lock_guard<std::mutex> lock(m);
+        if (--running == 0) idle.notify_all();
+    }
+};
+
 IntentsService::IntentsService(Outbound outbound, Clock clock, IdFn mintId, BrokerConfig config,
                                Loader load)
     : m_out(std::move(outbound))
     , m_clock(std::move(clock))
     , m_mintId(mintId)
     , m_load(std::move(load))
+    , m_gate(std::make_shared<Gate>())
     , m_broker(m_registry, std::move(mintId), config)
 {
+}
+
+IntentsService::~IntentsService()
+{
+    close();
+}
+
+void IntentsService::close()
+{
+    std::unique_lock<std::mutex> lock(m_gate->m);
+    m_gate->closed = true;
+    m_gate->idle.wait(lock, [this] { return m_gate->running == 0; });
 }
 
 void IntentsService::logRefusal(const std::string& caller, const std::string& line, std::int64_t now)
@@ -105,9 +139,14 @@ void IntentsService::run(std::vector<Effect> effects)
             if (!m_out.deliver) break;
             const std::string dispatchId = e.dispatchId;
             const json args = json::array({e.dispatchId, e.intent, e.params.dump(), e.requester});
-            std::weak_ptr<int> alive = m_alive;
-            m_out.deliver(e.module, args, [this, alive, dispatchId](bool reached, const json& replyJson) {
-                if (alive.expired()) return;
+            std::weak_ptr<Gate> weak = m_gate;
+            m_out.deliver(e.module, args, [this, weak, dispatchId](bool reached, const json& replyJson) {
+                const std::shared_ptr<Gate> gate = weak.lock();
+                if (!gate || !gate->enter()) return;
+                struct Leave {
+                    Gate& g;
+                    ~Leave() { g.leave(); }
+                } const leave{*gate};
                 // The provider answers `deliver` with {"ok": true} when it took it.
                 // Read in place, never copied: the reply is the provider's to shape.
                 bool accepted = false;
@@ -284,6 +323,7 @@ std::string IntentsService::setInstalled(const std::string& secret, const std::s
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_registry.rebuild(loaded);
+        m_broker.registryChanged(m_clock());
         effects = m_broker.takeEffects();
         for (const std::string& d : m_registry.diagnostics()) logLine(d);
         out = json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
@@ -339,6 +379,7 @@ json IntentsService::declareShellLocked(const std::string& shellJson)
                             stringAt(shell, "iconSource"));
     m_registry.setRestrictions(restricted);
     if (link) m_registry.registerLinkRequester(linkName, stringList(findKey(*link, "webIntents")));
+    m_broker.registryChanged(m_clock());
     return json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
 }
 

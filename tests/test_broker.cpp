@@ -207,12 +207,14 @@ LOGOS_TEST(a_choice_must_be_one_of_the_providers_shown)
 namespace {
 
 // What set_installed does: the registry rebuilt from these packages alone.
-void reinstall(World& w, const std::vector<json>& packages)
+// As set_installed does: the registry rebuilt, then the broker told.
+void reinstall(World& w, const std::vector<json>& packages, bool tellBroker = true)
 {
     std::vector<LoadedPackage> loaded;
     for (const json& p : packages)
         loaded.push_back(LoadedPackage{p["name"].get<std::string>(), "", "", p, ""});
     w.registry.rebuild(loaded);
+    if (tellBroker) w.broker.registryChanged(w.now);
 }
 
 json walletPackage()
@@ -294,6 +296,77 @@ LOGOS_TEST(a_link_request_cannot_go_to_a_provider_that_dropped_web)
     LOGOS_ASSERT_EQ(again.size(), std::size_t(1));
     LOGOS_ASSERT_EQ(again[0]["providers"].size(), std::size_t(1));
     LOGOS_ASSERT_EQ(again[0]["providers"][0]["module"].get<std::string>(), std::string("share_b"));
+}
+
+// Uninstalled while its chooser is open: the request ends, and the pick goes nowhere.
+LOGOS_TEST(a_requester_uninstalled_while_its_chooser_is_open_gets_nothing_delivered)
+{
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
+    const auto t = w.ask();
+    const auto shown = workOfKind(w.takeWork(), "choose");
+    LOGOS_ASSERT_EQ(shown.size(), std::size_t(1));
+
+    reinstall(w, {signerUiPackage(), pkg("cli_signer", "core", intentList({"signing.approve"}))});
+    LOGOS_ASSERT_EQ(w.settledError(t), err::notDeclared);
+    LOGOS_ASSERT_FALSE(w.broker.answer(shown[0]["id"].get<std::string>(),
+                                       json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    const auto dismissed = workOfKind(w.takeWork(), "dismiss");
+    LOGOS_ASSERT_EQ(dismissed.size(), std::size_t(1));
+    LOGOS_ASSERT_EQ(dismissed[0]["work"].get<std::string>(), shown[0]["id"].get<std::string>());
+}
+
+// Updated to a version that no longer asks for it, while a provider works on it.
+LOGOS_TEST(a_requester_that_stops_declaring_the_intent_loses_its_open_request)
+{
+    World w;
+    const auto t = w.ask();
+    const Effect d = pick(w, "signer_ui_backend");
+    reinstall(w, {pkg("wallet_module", "core"), signerUiPackage()});
+    LOGOS_ASSERT_EQ(w.settledError(t), err::notDeclared);
+    LOGOS_ASSERT_FALSE(w.broker.respond("signer_ui_backend", d.dispatchId, true, json::object(), "", w.now));
+}
+
+LOGOS_TEST(a_requester_a_new_restriction_leaves_out_loses_its_open_request)
+{
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
+    const auto t = w.ask();
+    workOfKind(w.takeWork(), "choose");
+    w.registry.setRestrictions({{"signing.approve", {"other_module"}}});
+    w.broker.registryChanged(w.now);
+    LOGOS_ASSERT_EQ(w.settledError(t), std::string("<pending>"));   // on the refusal floor
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(t), err::unavailable);
+}
+
+// Delivery checks the requester itself, whatever the broker was told.
+LOGOS_TEST(nothing_is_delivered_for_a_requester_that_may_no_longer_ask)
+{
+    World w(Presenter::OpensEverything, /*twoProviders=*/true);
+    const auto t = w.ask();
+    const auto shown = workOfKind(w.takeWork(), "choose");
+    reinstall(w, {signerUiPackage(), pkg("cli_signer", "core", intentList({"signing.approve"}))},
+              /*tellBroker=*/false);
+    LOGOS_ASSERT_TRUE(w.broker.answer(shown[0]["id"].get<std::string>(),
+                                      json{{"action", "choose"}, {"provider", "cli_signer"}}, w.now));
+    LOGOS_ASSERT_TRUE(ofKind(w.broker.takeEffects(), K::Deliver).empty());
+    LOGOS_ASSERT_EQ(w.settledError(t), err::notDeclared);
+}
+
+// Every requester's open params together, not only each one's.
+LOGOS_TEST(open_params_have_a_budget_across_every_requester)
+{
+    const json params{{"handle", std::string(1000, 'x')}};
+    BrokerConfig config;
+    config.maxOpenBytesTotal = approxBytes(params) * 3 / 2;
+    World w(Presenter::OpensWhenTold, /*twoProviders=*/false, config);
+    w.registry.ingest("other_module", pkg("other_module", "core", json::array(), intentList({"signing.approve"})),
+                      "", "");
+    const auto first = w.ask("wallet_module", "signing.approve", params);
+    const auto second = w.ask("other_module", "signing.approve", params);
+    w.advance(400);
+    LOGOS_ASSERT_EQ(w.settledError(first), std::string("<pending>"));
+    LOGOS_ASSERT_EQ(w.settledError(second, "other_module"), err::failed);
 }
 
 LOGOS_TEST(only_the_module_delivered_to_may_respond)

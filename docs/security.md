@@ -137,7 +137,7 @@ What the module can't check, and a host running it must ensure.
   terminal presenter, which already has the person's attention and shows one
   request at a time, MAY open every request. A graphical host that opens every
   request lets any declared module interrupt the person. Basecamp opens at once
-  only requests from packages the person trusts: see [Known limits](#known-limits).
+  only requests from packages that ship with it: see [Known limits](#known-limits).
 - **Show who is asking (5).** The presenter MUST show the module name beside
   every display name, SHOULD show who signed the package, and MUST treat
   `iconSource` as untrusted. It MUST NOT take input on a chooser drawn in the
@@ -201,7 +201,7 @@ Each limit says what kind it is and where it stands: open (to fix), accepted
 | Limit | Kind | Status |
 |---|---|---|
 | **Events reach every module.** `work_available(counter)` and `settled(handle)` carry no content, but show how busy the person is and when requests finish. Once a request is opened, a provider adds a chooser where none adds at most one install offer a minute, so the 400 ms floor doesn't hide what is installed. | Privacy | Open: needs events scoped to their recipient, which the transport doesn't offer (a module's events reach every replica). |
-| **Trusted packages interrupt without a click.** Until its pending list ships, Basecamp opens a request at once when the package asking ships with Basecamp or a publisher the person trusts signed it, a core module's with no screen too, and up to 16 choosers can queue. Any other waits for a click in its own screen, or expires unseen. Basecamp's QML intent path opens every request from apps' screens. | Temporary | Accepted until Basecamp's Activity view shows the pending list. `--intents-attention interactive` opens only what the person clicked for. |
+| **What ships with Basecamp interrupts without a click.** Until its pending list ships, Basecamp opens a request at once when the package asking ships with Basecamp, a core module's with no screen too, and up to 16 choosers can queue. Any other, a trusted publisher's included, waits for a click in its own screen, or expires unseen; a core module's that doesn't ship with Basecamp always does. Basecamp's QML intent path opens every request from apps' screens. | Temporary | Accepted until Basecamp's Activity view shows the pending list. `--intents-attention interactive` opens only what the person clicked for. |
 | **Presenter results can be lost.** Past 1000 queued work items with no notice left to drop, the oldest `result` or `dismiss` goes, so while the presenter isn't pulling, the answer to the shell's own request can be lost. | Defect | Open: the fix keeps results by handle for the presenter to fetch, a presenter-contract change. |
 | **No cancellation reaches the provider.** Cancelling, a deadline or the requester's removal ends the request; a provider that already took it isn't told, and isn't stopped. | Execution lifecycle | Open: needs a provider-contract change. Until then, the provider requirements above. |
 | **A provider that dies after taking a delivery** is noticed only at the request's deadline, up to 10 minutes. | Integration gap | Open: needs module lifecycle from the core (`modules_state`). |

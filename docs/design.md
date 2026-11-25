@@ -1,7 +1,7 @@
 # Generic intents design
 
 **Status:** design record, kept to the code. What is built and what is left: [Steps](#steps). The wire API is in `contracts/`; the security model, with what each rule depends on, is in [`security.md`](security.md).
-**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, it opens at once only what a package the person trusts asks, and any other request on a click in its screen: an accepted limit ([`security.md`](security.md#known-limits)).
+**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, it opens at once only what a package that ships with Basecamp asks, and any other request on a click in its screen: an accepted limit ([`security.md`](security.md#known-limits)).
 
 ## Decisions
 
@@ -224,8 +224,8 @@ Consent is drawn by the frontend and the provider, never the requester. The requ
 | 1 | Write the generic contract: result schemas, attested requester, `handoff` as a hint; split the namespaces | — | **Done** (`contracts/`) |
 | 2 | Generic names for current intents, with aliases (`signing.approve` first) | 1 | **Dropped**: names are free strings, see "Names say what's wanted" |
 | 3 | `intents_module`: the broker and registry behind requester / provider / presenter APIs (the presenter pulls), with the security rules above | 1 | **Done**: this repo |
-| 4 | Basecamp: becomes the presenter at startup, pulls its work, starts what the person picks; auto-return driven by completion notices | 3 | **Done** (`logos-basecamp`); until the Activity view shows the pending list, opens at once only what a trusted package asks |
-| 4b | Basecamp: watches input per view, and opens a pending request on a click in that module's screen | 4 | **Done** (`logos-basecamp`): for packages the person doesn't trust, and for every request with `--intents-attention interactive` |
+| 4 | Basecamp: becomes the presenter at startup, pulls its work, starts what the person picks; auto-return driven by completion notices | 3 | **Done** (`logos-basecamp`); until the Activity view shows the pending list, opens at once only what a package that ships with Basecamp asks |
+| 4b | Basecamp: watches input per view, and opens a pending request on a click in that module's screen | 4 | **Done** (`logos-basecamp`): for every package that doesn't ship with Basecamp, and for every request with `--intents-attention interactive` |
 | 5 | Apps ask and provide through their backend module, which declares the app's intents | 3 | **Done** (`logos-module-builder`, `logos-view-module`) |
 | 6 | CLI presenter and provider (the Signer CLI app) | 3, 5 | Not started |
 | 7 | Move every app's intent calls from its view to its backend (requesters and providers); update the tutorials and guides | 3, 5, and each app's `"backend": "module"` port | Started: Package Manager UI; no other app |

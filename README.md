@@ -61,7 +61,7 @@ A request for another module's intent waits as pending until the presenter
 opens it (up to 30 minutes), whether or not anything provides it: nothing about
 what is installed is decided before then. One for an intent your module
 provides itself goes straight to it. Basecamp opens it at once when the person just clicked
-in the requesting app's screen.
+in the requesting app's screen, or when the package asking ships with Basecamp.
 
 Limits per requester: params are plain data of at most 1 MiB (8 levels, 1000
 values); 16 requests open and 4 in the pending list at a time; results are kept
@@ -132,9 +132,13 @@ Until a presenter claims, nobody can be asked: every request is `unavailable`.
 The presenter decides when to interrupt the person. A request for another
 module's intent comes as a `pending` item and waits until the presenter opens
 it: a terminal presenter opens everything. Basecamp opens one at once when the
-package asking ships with it or a publisher the person trusts signed it, and any
-other only when the person just clicked in that module's screen, once per click
-(with `--intents-attention interactive`, every request waits for that click).
+package asking ships with it, and any other only when the person just clicked in
+that module's screen, once per click (with `--intents-attention interactive`,
+every request waits for that click). Trusting a publisher lets its packages
+install, not interrupt, and a core module has no screen to click in: unless it
+ships with Basecamp, what it asks waits until it expires. A module asking on an
+app's behalf has no click behind it, so ask from the app's own backend, in
+response to the click.
 What a host must do is in [`docs/security.md`](docs/security.md#host-requirements).
 
 The presenter pulls its work with `next_work(secret)` when `work_available`

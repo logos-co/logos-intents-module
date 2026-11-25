@@ -202,6 +202,13 @@ std::string capturedStderr(const std::function<void()>& fn)
     return log;
 }
 
+std::size_t occurrences(const std::string& text, const std::string& needle)
+{
+    std::size_t n = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
+    return n;
+}
+
 long long msSince(std::chrono::steady_clock::time_point t0)
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -557,6 +564,18 @@ LOGOS_TEST(requests_past_the_rate_are_refused_in_the_reply)
     LOGOS_ASSERT_EQ(admitted, 20);
 }
 
+// Refused with `failed` like any failure, so the log says why: once a minute
+// per requester, however fast it asks.
+LOGOS_TEST(requests_past_the_rate_are_logged_once_a_minute)
+{
+    Basecamp h(/*opensEverything=*/true);
+    const std::string log = capturedStderr([&]() {
+        const CallCaller m = CallCaller::module("chain_module");
+        for (int i = 0; i < 100; ++i) h.service->request("absent.thing", "{}");
+    });
+    LOGOS_ASSERT_EQ(occurrences(log, "refused absent.thing from chain_module: over its request rate"), std::size_t(1));
+}
+
 // A new shell declaration replaces the restrictions whole, never adds to them,
 // and one that can't be read changes nothing.
 LOGOS_TEST(a_shell_declaration_replaces_its_restrictions_whole)
@@ -647,6 +666,37 @@ LOGOS_TEST(metadata_cannot_forge_log_lines)
     });
     LOGOS_ASSERT_TRUE(log.find("\n[intents_module] presenter claimed") == std::string::npos);
     LOGOS_ASSERT_TRUE(log.find("\n[intents_module] refused claim") == std::string::npos);
+}
+
+// A host sends what is installed again and again: a module whose directory
+// holds no metadata.json declares nothing, and says nothing.
+LOGOS_TEST(a_package_without_metadata_json_declares_nothing_quietly)
+{
+    Basecamp h(/*opensEverything=*/false);
+    const std::string bare = h.dir.add("bare_module", json::object());
+    std::remove((bare + "/metadata.json").c_str());
+    const std::string log = capturedStderr([&]() {
+        h.install(json::array({json{{"name", "bare_module"}, {"installDir", bare}}}));
+    });
+    LOGOS_ASSERT_TRUE(log.find("bare_module") == std::string::npos);
+}
+
+// One that can't be read is said once while it lasts, and again if it comes back.
+LOGOS_TEST(a_diagnostic_is_logged_once_while_it_lasts)
+{
+    Basecamp h(/*opensEverything=*/false);
+    const json liar = json::array({json{{"name", "liar_module"},
+                                        {"installDir", h.dir.add("liar_module", json{{"name", "someone_else"}})}}});
+    const std::string twice = capturedStderr([&]() {
+        h.install(liar);
+        h.install(liar);
+    });
+    LOGOS_ASSERT_EQ(occurrences(twice, "liar_module: metadata.json names another package"), std::size_t(1));
+    const std::string back = capturedStderr([&]() {
+        h.install(json::array());
+        h.install(liar);
+    });
+    LOGOS_ASSERT_EQ(occurrences(back, "liar_module: metadata.json names another package"), std::size_t(1));
 }
 
 // ── L4: bad presenter input is refused, not thrown ──────────────────────────

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <filesystem>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,7 +31,7 @@ std::string key(const std::string& name, const std::string& intent)
     return name + "/" + intent;
 }
 
-enum class FileRead { Ok, Unreadable, NotRegular, TooLarge };
+enum class FileRead { Ok, Missing, Unreadable, NotRegular, TooLarge };
 
 // The whole of `path` into *text, or why not. Only a regular file is read, and
 // opening it never waits, so a FIFO, a pipe or a device can't stall the module.
@@ -47,7 +48,11 @@ FileRead readRegularFile(const std::string& path, std::size_t maxBytes, std::str
     const HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ,
                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return FileRead::Unreadable;
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? FileRead::Missing
+                                                                             : FileRead::Unreadable;
+    }
     BY_HANDLE_FILE_INFORMATION info{};
     if (GetFileType(h) != FILE_TYPE_DISK || !GetFileInformationByHandle(h, &info)
         || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -72,7 +77,7 @@ FileRead readRegularFile(const std::string& path, std::size_t maxBytes, std::str
     return FileRead::Ok;
 #else
     const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) return FileRead::Unreadable;
+    if (fd < 0) return errno == ENOENT || errno == ENOTDIR ? FileRead::Missing : FileRead::Unreadable;
     struct stat st {};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
@@ -99,7 +104,9 @@ FileRead readRegularFile(const std::string& path, std::size_t maxBytes, std::str
 }
 
 // <installDir>/metadata.json, or a discarded value and a reason. Bounded before
-// anything is built: a package controls this file.
+// anything is built: a package controls this file. A package whose directory
+// holds none declares nothing, which is no reason; a directory that isn't
+// there is.
 json readManifest(const std::string& installDir, std::string* error)
 {
     const std::string path = installDir + "/metadata.json";
@@ -107,6 +114,11 @@ json readManifest(const std::string& installDir, std::string* error)
     switch (readRegularFile(path, kManifestLimits.maxBytes, &text)) {
     case FileRead::Ok:
         break;
+    case FileRead::Missing: {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(installDir, ec)) *error = "cannot read " + forLog(path);
+        return json::value_t::discarded;
+    }
     case FileRead::Unreadable:
         *error = "cannot read " + forLog(path);
         return json::value_t::discarded;
@@ -263,6 +275,7 @@ void IntentRegistry::rebuild(const std::vector<LoadedPackage>& packages)
             diagnose(forLog(p.name) + ": " + p.error);
             continue;
         }
+        if (p.metadata.is_discarded()) continue;   // no metadata.json: it declares nothing
         // The host names the package; its own file must agree.
         if (stringAt(p.metadata, "name") != p.name) {
             diagnose(forLog(p.name) + ": metadata.json names another package — skipped");

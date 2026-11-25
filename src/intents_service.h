@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,7 @@ private:
     bool m_claimed = false;
     std::vector<Effect> m_deferredSettled;
     std::map<std::string, std::int64_t> m_lastRefusalLog;
+    std::set<std::string> m_loggedDiagnostics;   // the last set_installed's, already logged
 };
 
 } // namespace intents

@@ -190,7 +190,10 @@ std::string IntentsService::request(const std::string& intent, const std::string
         if (who.empty() || !isValidName(intent) || !m_registry.declaresUse(who, intent))
             return refusal(err::notDeclared);
         const std::int64_t now = m_clock();
-        if (!m_broker.admit(who, now)) return refusal(err::failed);
+        if (!m_broker.admit(who, now)) {
+            logRefusal(who, "refused " + forLog(intent, 64) + " from " + who + ": over its request rate", now);
+            return refusal(err::failed);
+        }
 
         // Only now, for a declared request within its rate, is anything it sent read.
         const json params = paramsJson.empty() ? json::object() : parseBounded(paramsJson, kPayloadLimits);
@@ -325,7 +328,13 @@ std::string IntentsService::setInstalled(const std::string& secret, const std::s
         m_registry.rebuild(loaded);
         m_broker.registryChanged(m_clock());
         effects = m_broker.takeEffects();
-        for (const std::string& d : m_registry.diagnostics()) logLine(d);
+        // Each problem once while it lasts: the host sends the list again often.
+        std::set<std::string> current;
+        for (const std::string& d : m_registry.diagnostics()) {
+            if (!m_loggedDiagnostics.count(d)) logLine(d);
+            current.insert(d);
+        }
+        m_loggedDiagnostics = std::move(current);
         out = json{{"ok", true}, {"diagnostics", m_registry.diagnostics()}};
     }
     run(std::move(effects));

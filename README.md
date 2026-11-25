@@ -50,7 +50,7 @@ longer than a call's timeout. `settled` carries the handle only; the result is
 pulled with the receipt and is readable only by the requester. Two refusals come
 back in the reply itself, with no handle and no event: `not_declared` (your
 manifest doesn't list the intent in `uses`) and `failed` (more than 20 requests
-at once, or 5 a second sustained).
+at once, or 5 a second sustained; logged at most once a minute per requester).
 
 Errors in a result: `unavailable` (no provider, not allowed, or the provider went
 away — deliberately indistinguishable), `not_declared` (your manifest stopped

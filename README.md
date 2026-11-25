@@ -1,11 +1,10 @@
 # logos-intents-module
 
 > [!NOTE]
-> **Not in a release yet.** Basecamp runs it behind `--intents-module`, in
-> development builds, until the 0.5 switch. Basecamp's presenter, and providers
-> and requesters, need changes in `logos-basecamp`, `logos-module-builder` and
-> `logos-view-module` that aren't released yet. Still to come: Basecamp's
-> pending list (until then it opens every request), and apps ported onto it.
+> Basecamp runs it in every build from 0.4.0, for app backends and core
+> modules; apps' screens keep Basecamp's QML intent path beside it until 0.5.
+> Still to come: Basecamp's pending list (until then a request that doesn't
+> open waits unseen), and more apps ported onto it.
 
 `intents_module` routes requests that need a person — approve a signature, pick a
 wallet, open an app — from the module that asks to the module that provides,
@@ -37,7 +36,7 @@ an app through its backend module.
 
 ```cpp
 auto intents = modules().bind_intents("intents_module");
-// subscribe to settled() first
+intents.onSettled([](const std::string& handle) { /* pull its result, as below */ });
 auto t = json::parse(intents.request("signing.approve",
                                      R"({"service":"signer_manager_module","handle":"smh_3f2a"})"));
 if (!t["ok"]) { /* t["error"]: not_declared, or failed when over the rate */ }
@@ -132,10 +131,11 @@ Until a presenter claims, nobody can be asked: every request is `unavailable`.
 
 The presenter decides when to interrupt the person. A request for another
 module's intent comes as a `pending` item and waits until the presenter opens
-it: a terminal presenter opens everything; Basecamp opens a request when the
-person just clicked in that module's screen, once per click, and until its
-Activity view shows the pending list it opens everything, as a development
-default. What a host must do is in [`docs/security.md`](docs/security.md#host-requirements).
+it: a terminal presenter opens everything. Basecamp opens one at once when the
+package asking ships with it or a publisher the person trusts signed it, and any
+other only when the person just clicked in that module's screen, once per click
+(with `--intents-attention interactive`, every request waits for that click).
+What a host must do is in [`docs/security.md`](docs/security.md#host-requirements).
 
 The presenter pulls its work with `next_work(secret)` when `work_available`
 fires, and answers items with `answer(secret, id, {...})`:

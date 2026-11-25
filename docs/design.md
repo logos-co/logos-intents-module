@@ -1,7 +1,7 @@
 # Generic intents design
 
 **Status:** design record, kept to the code. What is built and what is left: [Steps](#steps). The wire API is in `contracts/`; the security model, with what each rule depends on, is in [`security.md`](security.md).
-**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, Basecamp opens every request, as its QML intent path does; that is a development default, not for untrusted modules.
+**Scope:** intents only. Activity (the feed, notifications, search) is a separate discussion. One link is decided: a request the person didn't just click for goes into a **pending list**, shown **alongside activity**, never popped up. Until Basecamp's Activity view shows that list, it opens at once only what a package the person trusts asks, and any other request on a click in its screen: an accepted limit ([`security.md`](security.md#known-limits)).
 
 ## Decisions
 
@@ -10,7 +10,7 @@
 3. **The presenter has its own contract,** `intents_presenter.lidl`, used only by frontends. Apps never get bindings for it.
 4. **A module only ever acts as itself, and the presenter decides when to interrupt.** `intents_module` knows modules and intents, not apps or screens. A request for another module's intent waits until the presenter opens it; the presenter, which sees the clicks, opens one at once when the person just clicked in the screen of the module that asked.
 5. **Auto-return stays in the frontend.** `intents_module` reports a completed dispatch with its `handoff` flag; Basecamp applies its guards (frontmost, dialog open, dwell, circuit breaker) and decides whether to navigate.
-6. **Rollout:** the QML intent path stays on, unchanged, through every 0.4 release. `intents_module` and the backend path are built during 0.4 but not switched on in a released Basecamp. In 0.5 both flip together: QML intents off, `intents_module` on. No release runs two brokers.
+6. **Rollout:** from 0.4.0 Basecamp runs `intents_module` in every build, beside its QML intent path: app backends and core modules ask and answer through the module, apps' screens on the QML path, unchanged. Each side reaches only its own providers; Basecamp's own intents answer on both. In 0.5 the QML path is turned off.
 
 ## The idea
 
@@ -223,15 +223,15 @@ Consent is drawn by the frontend and the provider, never the requester. The requ
 |---|---|---|---|
 | 1 | Write the generic contract: result schemas, attested requester, `handoff` as a hint; split the namespaces | — | **Done** (`contracts/`) |
 | 2 | Generic names for current intents, with aliases (`signing.approve` first) | 1 | **Dropped**: names are free strings, see "Names say what's wanted" |
-| 3 | `intents_module`: the broker and registry behind requester / provider / presenter APIs (the presenter pulls), with the security rules above | 1 | **Done**, work in progress: this repo, behind `--intents-module` |
-| 4 | Basecamp: becomes the presenter at startup, pulls its work, starts what the person picks; auto-return driven by completion notices | 3 | **Built, not merged** (`logos-basecamp`); opens every request until the Activity view shows the pending list |
-| 4b | Basecamp: watches input per view, and opens a pending request on a click in that module's screen | 4 | **Built, not merged** (`logos-basecamp`) |
-| 5 | Apps ask and provide through their backend module, which declares the app's intents | 3 | **Built, not merged** (`logos-module-builder`, `logos-view-module`) |
+| 3 | `intents_module`: the broker and registry behind requester / provider / presenter APIs (the presenter pulls), with the security rules above | 1 | **Done**: this repo |
+| 4 | Basecamp: becomes the presenter at startup, pulls its work, starts what the person picks; auto-return driven by completion notices | 3 | **Done** (`logos-basecamp`); until the Activity view shows the pending list, opens at once only what a trusted package asks |
+| 4b | Basecamp: watches input per view, and opens a pending request on a click in that module's screen | 4 | **Done** (`logos-basecamp`): for packages the person doesn't trust, and for every request with `--intents-attention interactive` |
+| 5 | Apps ask and provide through their backend module, which declares the app's intents | 3 | **Done** (`logos-module-builder`, `logos-view-module`) |
 | 6 | CLI presenter and provider (the Signer CLI app) | 3, 5 | Not started |
-| 7 | Move every app's intent calls from its view to its backend (requesters and providers); update the tutorials and guides | 3, 5, and each app's `"backend": "module"` port | Started: Package Manager UI, not merged; no other app |
-| 8 | 0.5 switch: QML intent path off in `logos-view-module-runtime` and Basecamp, `intents_module` on | 4, 4b, 7 | 0.5 |
+| 7 | Move every app's intent calls from its view to its backend (requesters and providers); update the tutorials and guides | 3, 5, and each app's `"backend": "module"` port | Started: Package Manager UI; no other app |
+| 8 | 0.5 switch: QML intent path off in `logos-view-module-runtime` and Basecamp | 4, 4b, 7 | 0.5 |
 
-Steps 1–7 are built during 0.4; 0.4 releases keep the QML intent path on. Step 8 ships in 0.5, with the removal of QML-only apps.
+Steps 1–7 are built during 0.4, and 0.4 releases run `intents_module` beside the QML intent path. Step 8 ships in 0.5, with the removal of QML-only apps.
 
 **Still missing before the switch:**
 - the pending list next to activity, so Basecamp opens only what the person clicked for;

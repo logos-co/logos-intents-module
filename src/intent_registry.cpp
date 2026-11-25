@@ -5,9 +5,19 @@
 #include <algorithm>
 #include <cerrno>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace intents {
 
@@ -20,42 +30,93 @@ std::string key(const std::string& name, const std::string& intent)
     return name + "/" + intent;
 }
 
-// <installDir>/metadata.json, or a discarded value and a reason. Bounded before
-// anything is built: a package controls this file. Only a regular file is read,
-// and the open never waits, so a FIFO or device can't stall the module.
-json readManifest(const std::string& installDir, std::string* error)
+enum class FileRead { Ok, Unreadable, NotRegular, TooLarge };
+
+// The whole of `path` into *text, or why not. Only a regular file is read, and
+// opening it never waits, so a FIFO, a pipe or a device can't stall the module.
+FileRead readRegularFile(const std::string& path, std::size_t maxBytes, std::string* text)
 {
-    const std::string path = installDir + "/metadata.json";
-    const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) {
-        *error = "cannot read " + forLog(path);
-        return json::value_t::discarded;
+#ifdef _WIN32
+    const int wide = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(),
+                                         static_cast<int>(path.size()), nullptr, 0);
+    if (wide <= 0) return FileRead::Unreadable;
+    std::wstring wpath(static_cast<std::size_t>(wide), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(), static_cast<int>(path.size()),
+                        wpath.data(), wide);
+    // Opening a pipe doesn't wait for its other end, and a directory doesn't open.
+    const HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return FileRead::Unreadable;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileType(h) != FILE_TYPE_DISK || !GetFileInformationByHandle(h, &info)
+        || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        CloseHandle(h);
+        return FileRead::NotRegular;
     }
+    char buf[4096];
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(h, buf, sizeof buf, &n, nullptr)) {
+            CloseHandle(h);
+            return FileRead::Unreadable;
+        }
+        if (n == 0) break;
+        text->append(buf, n);
+        if (text->size() > maxBytes) {
+            CloseHandle(h);
+            return FileRead::TooLarge;
+        }
+    }
+    CloseHandle(h);
+    return FileRead::Ok;
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return FileRead::Unreadable;
     struct stat st {};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
-        *error = "metadata.json is not a regular file";
-        return json::value_t::discarded;
+        return FileRead::NotRegular;
     }
-    std::string text;
     char buf[4096];
     for (;;) {
         const ssize_t n = ::read(fd, buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) {
             ::close(fd);
-            *error = "cannot read " + forLog(path);
-            return json::value_t::discarded;
+            return FileRead::Unreadable;
         }
         if (n == 0) break;
-        text.append(buf, static_cast<std::size_t>(n));
-        if (text.size() > kManifestLimits.maxBytes) {
+        text->append(buf, static_cast<std::size_t>(n));
+        if (text->size() > maxBytes) {
             ::close(fd);
-            *error = "metadata.json is larger than 1 MiB";
-            return json::value_t::discarded;
+            return FileRead::TooLarge;
         }
     }
     ::close(fd);
+    return FileRead::Ok;
+#endif
+}
+
+// <installDir>/metadata.json, or a discarded value and a reason. Bounded before
+// anything is built: a package controls this file.
+json readManifest(const std::string& installDir, std::string* error)
+{
+    const std::string path = installDir + "/metadata.json";
+    std::string text;
+    switch (readRegularFile(path, kManifestLimits.maxBytes, &text)) {
+    case FileRead::Ok:
+        break;
+    case FileRead::Unreadable:
+        *error = "cannot read " + forLog(path);
+        return json::value_t::discarded;
+    case FileRead::NotRegular:
+        *error = "metadata.json is not a regular file";
+        return json::value_t::discarded;
+    case FileRead::TooLarge:
+        *error = "metadata.json is larger than 1 MiB";
+        return json::value_t::discarded;
+    }
     json doc = parseBounded(text, kManifestLimits);
     if (!doc.is_object()) {
         *error = "metadata.json is malformed, too deeply nested or too large";
